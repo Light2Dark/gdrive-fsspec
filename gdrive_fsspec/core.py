@@ -153,16 +153,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     def _connect_cache(self):
         import pydata_google_auth
 
-        return pydata_google_auth.get_user_credentials(
-            self.scopes, use_local_webserver=True, **self.auth_kwargs
-        )
+        kwargs = {"use_local_webserver": True, **self.auth_kwargs}
+        return pydata_google_auth.get_user_credentials(self.scopes, **kwargs)
 
     def _connect_service_account(self):
-        if self.creds is None:
-            raise ValueError(
-                "Service account credentials are required when token='service_account'. "
-                "Pass creds as a dict or path to a credentials JSON file."
-            )
         if isinstance(self.creds, str):
             if self.creds[0] != "{":
                 creds = json.load(open(self.creds))
