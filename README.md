@@ -81,18 +81,20 @@ JSON, or by using type "cache" following successful browser-based auth.
 All tests take place in a directory "gdrive_fsspec_testdir".
 
 ```sh
-pip install -e . pytest
-pytest -v
+uv sync
+uv run pytest -v                  # unit tests (default)
+uv run pytest -v -m integration   # integration tests (requires credentials below)
 ```
 
 ### Style
 
-Please run pre-commit before submitting PRs. You can automate this by
+Please run prek before submitting PRs. You can automate this by
 calling
 ```bash
-$ pre-commit install
+uv run prek install
+uv run prek run --all-files
 ```
-in the repo (once) before committing.
+in the repo (once) before committing. This runs ruff, codespell, and pyrefly.
 
 ## Other implementations
 

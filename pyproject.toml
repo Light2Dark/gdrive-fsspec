@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
+
 dependencies = [
     "fsspec",
     "google-api-python-client",
@@ -31,11 +32,35 @@ dependencies = [
     "pydata_google_auth"
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "prek>=0.4.4",
+    "ruff>=0.15.16",
+    "pyrefly>=1.0.0",
+    "google-api-python-client-stubs>=1.37.0",
+]
+
 [project.urls]
 Source = "http://github.com/fsspec/gdrive-fsspec"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gdrive_fsspec*"]
+exclude = ["gdrive_fsspec.tests*"]
+
 [tool.setuptools_scm]
 version_file = "gdrive_fsspec/_version.py"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.ruff.lint.per-file-ignores]
+"gdrive_fsspec/_version.py" = ["ALL"]
 
 [tool.pytest.ini_options]
 addopts = """\
@@ -46,3 +71,10 @@ addopts = """\
 markers = [
     "integration: marks test as integration test consuming external resources (select with '-m integration')",
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "gdrive_fsspec/**/*.py",
+]
+baseline = "pyrefly-baseline.json"
+python-version = "3.10"

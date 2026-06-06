@@ -4,7 +4,6 @@ import pytest
 
 import gdrive_fsspec
 
-
 testdir = "gdrive_fsspec_testdir"
 kwargs = {
     "creds": os.getenv("GDRIVE_FSSPEC_CREDENTIALS_PATH"),

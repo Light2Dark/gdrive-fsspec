@@ -1,15 +1,14 @@
-from functools import cached_property
 import json
 import logging
 import os
 import re
+from functools import cached_property
 
-from fsspec.spec import AbstractFileSystem, AbstractBufferedFile
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials
 from google.oauth2 import service_account
-
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 logger = logging.getLogger("gdrive_fsspec")
 scope_dict = {
