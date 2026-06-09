@@ -76,6 +76,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         spaces="drive",
         creds=None,
         drive=None,
+        auth_kwargs=None,
         **kwargs,
     ):
         """
@@ -100,6 +101,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             don't want the user to be prompted to authenticate.
             The files need to be shared with the service account email address, that can be found
             in the json file.
+        :param auth_kwargs: dict
+            Additional keyword arguments passed to the authentication backend
+            (``pydata_google_auth.get_user_credentials`` for user OAuth, or
+            ``service_account.Credentials.from_service_account_info`` for service
+            accounts). For headless or remote environments where a local callback
+            server is unavailable, pass ``use_local_webserver=False`` to request a
+            token via the console.
         :param kwargs:
             Passed to parent
         """
@@ -108,6 +116,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.scopes = [scope_dict[access]]
         self.spaces = spaces
         self.creds = creds
+        self.auth_kwargs = auth_kwargs or {}
         self.connect(method=token)
         if token == "anon":
             self.drive = None
@@ -148,9 +157,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     def _connect_cache(self):
         import pydata_google_auth
 
-        return pydata_google_auth.get_user_credentials(
-            self.scopes, use_local_webserver=True
-        )
+        kwargs = {"use_local_webserver": True, **self.auth_kwargs}
+        return pydata_google_auth.get_user_credentials(self.scopes, **kwargs)
 
     def _connect_service_account(self):
         if isinstance(self.creds, str):
@@ -161,7 +169,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             creds = self.creds
         return service_account.Credentials.from_service_account_info(
-            info=creds, scopes=self.scopes
+            info=creds, scopes=self.scopes, **self.auth_kwargs
         )
 
     @cached_property
