@@ -16,7 +16,7 @@ kwargs = {
 def _credentials_configured():
     token = os.getenv("GDRIVE_FSSPEC_CREDENTIALS_TYPE", "service_account")
     if token == "service_account":
-        return os.getenv("GDRIVE_FSSPEC_CREDENTIALS_PATH") is not None
+        return bool(os.getenv("GDRIVE_FSSPEC_CREDENTIALS_PATH"))
     return True
 
 
