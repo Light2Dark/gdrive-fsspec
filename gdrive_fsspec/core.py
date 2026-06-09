@@ -102,7 +102,12 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             The files need to be shared with the service account email address, that can be found
             in the json file.
         :param auth_kwargs: dict
-            Additional keyword arguments to pass to the authentication method.
+            Additional keyword arguments passed to the authentication backend
+            (``pydata_google_auth.get_user_credentials`` for user OAuth, or
+            ``service_account.Credentials.from_service_account_info`` for service
+            accounts). For headless or remote environments where a local callback
+            server is unavailable, pass ``use_local_webserver=False`` to request a
+            token via the console.
         :param kwargs:
             Passed to parent
         """

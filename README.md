@@ -21,7 +21,7 @@ As gdrivefs implements the fsspec interface, most documentation can be found at 
 
 There are several methods to authenticate gdrivefs against Google Drive.
 
-1. Service account credentials
+#### 1. Service account credentials
 
 In this method, you provide a dict containing the service account credentials obtained
 in the GCP console. The dict content is the same as the JSON file downloaded from the GCP console.
@@ -36,9 +36,9 @@ fs = GoogleDriveFileSystem(creds=service_account_credentials,
                            token="service_account")
 ```
 
-2. OAuth with user credentials
+#### 2. OAuth with user credentials
 
- A browser will be opened to complete the OAuth authentication flow. Afterwards, the access
+A browser will be opened to complete the OAuth authentication flow. Afterwards, the access
 token will be stored locally, and you can reuse it in subsequent sessions.
 
 ```python
@@ -47,9 +47,21 @@ token = 'browser'
 # use this on subsequent attempts
 # token = 'cache'
 fs = GoogleDriveFileSystem(token=token)
- ```
+```
 
-3. Anonymous (read-only) access
+On headless or remote machines (SSH sessions, containers, CI, and similar environments),
+you may not be able to bind a local callback server or open a browser on the same host.
+In that case, pass `use_local_webserver: False` in `auth_kwargs` to request a token via
+the console.
+
+```python
+fs = GoogleDriveFileSystem(
+    token=token,
+    auth_kwargs={'use_local_webserver': False},
+)
+```
+
+#### 3. Anonymous (read-only) access
 
 If you want to interact with files that are shared publicly ("anyone with the link"),
 then you do not need to authenticate to Google Drive.
