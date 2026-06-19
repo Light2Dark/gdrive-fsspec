@@ -26,7 +26,7 @@ jobs:
       - uses: ./.github/actions/setup
 
       - name: Run pre-commit
-        run: SKIP=pyrefly-check uvx pre-commit run --all-files
+        run: SKIP=pyrefly-check uv run pre-commit run --all-files
 
   typecheck:
     name: Typecheck

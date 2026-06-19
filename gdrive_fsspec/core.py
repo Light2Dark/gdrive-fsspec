@@ -1,15 +1,17 @@
-from functools import cached_property
 import json
 import logging
 import os
 import re
+from collections.abc import Mapping
+from functools import cached_property
+from typing import Any
 
-from fsspec.spec import AbstractFileSystem, AbstractBufferedFile
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials
 from google.oauth2 import service_account
-
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from typing_extensions import override
 
 logger = logging.getLogger("gdrive_fsspec")
 scope_dict = {
@@ -32,23 +34,26 @@ fields = ",".join(
 )
 
 
-def _normalize_path(prefix, name):
+def _normalize_path(prefix: str, name: str) -> str:
     raw_prefix = prefix.strip("/")
     return "/" + "/".join([raw_prefix, name])
 
 
-def _finfo_from_response(f, path_prefix=None):
+def _finfo_from_response(
+    f: Mapping[str, Any], path_prefix: str | None = None
+) -> dict[str, Any]:
     # strictly speaking, other types might be capable of having children,
     # such as packages
     # TODO: check specifically for links
-    ftype = "directory" if f.get("mimeType") == DIR_MIME_TYPE else "file"
+    result = dict(f)
+    ftype = "directory" if result.get("mimeType") == DIR_MIME_TYPE else "file"
     if path_prefix:
-        name = _normalize_path(path_prefix, f["name"])
+        name = _normalize_path(path_prefix, result["name"])
     else:
-        name = f["name"]
-    info = {"name": name.lstrip("/"), "size": int(f.get("size", 0)), "type": ftype}
-    f.update(info)
-    return f
+        name = result["name"]
+    info = {"name": name.lstrip("/"), "size": int(result.get("size", 0)), "type": ftype}
+    result.update(info)
+    return result
 
 
 class MultipleFilesError(FileNotFoundError):
@@ -67,17 +72,18 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     protocol = "gdrive"
     root_marker = ""
+    drive: str | None
 
     def __init__(
         self,
-        root_file_id=None,
-        token="cache",
-        access="full_control",
-        spaces="drive",
-        creds=None,
-        drive=None,
-        auth_kwargs=None,
-        **kwargs,
+        root_file_id: str | None = None,
+        token: str = "cache",
+        access: str = "full_control",
+        spaces: str = "drive",
+        creds: str | dict[str, Any] | None = None,
+        drive: str | None = None,
+        auth_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
     ):
         """
         :param root_file_id: str or None
@@ -126,7 +132,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             self.drive = drive
         self.root_file_id = root_file_id or self.drive or "root"
 
-    def connect(self, method=None):
+    def _strip_path(self, path: str) -> str:
+        stripped = self._strip_protocol(path)
+        if not isinstance(stripped, str):
+            raise TypeError("path must be a single string")
+        return stripped
+
+    def connect(self, method: str | None = None) -> None:
         if method == "browser":
             cred = self._connect_browser()
         elif method == "cache":
@@ -188,8 +200,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 break
         return out
 
-    # pyrefly: ignore [bad-override]
-    def mkdir(self, path, create_parents=True, **kwargs):
+    @override
+    def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> Any:
         if create_parents and self._parent(path):
             self.makedirs(self._parent(path), exist_ok=True)
         par = self._parent(path)
@@ -202,14 +214,14 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if self.exists(path):
             raise FileExistsError(path)
         logger.debug(f"Creating {path}, child of {parent_id}")
-        # pyrefly: ignore [bad-argument-type]
         out = self.files.create(body=meta, supportsAllDrives=True).execute()
         if par in self.dircache:
             self.dircache[par].append(_finfo_from_response(out, path_prefix=par))
         self.dircache[path] = []
         return out
 
-    def makedirs(self, path, exist_ok=True):
+    @override
+    def makedirs(self, path: str, exist_ok: bool = True) -> None:
         parts = path.split("/")
         path = ""
         for i, part in enumerate(parts):
@@ -219,11 +231,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             elif i == len(parts) - 1 and not exist_ok:
                 raise FileExistsError(path)
 
+    @override
     # pyrefly: ignore [bad-override]
-    def rm_file(self, path, file_id=None):
+    def rm_file(self, path: str, file_id: str | None = None) -> None:
         file_id = file_id or self.info(path)["id"]
         logger.debug(f"Removing {path}, file_id={file_id}")
-        # pyrefly: ignore [bad-argument-type]
         self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
         par = self._parent(path)
         if par in self.dircache:
@@ -232,17 +244,21 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             listing.pop(i)
         self.dircache.pop(path, None)
 
-    def rm(self, path, recursive=True, maxdepth=None):
+    @override
+    def rm(
+        self, path: str, recursive: bool = True, maxdepth: int | None = None
+    ) -> None:
         if recursive is False and self.isdir(path) and self.ls(path):
             raise ValueError("Attempt to delete non-empty folder")
         self.rm_file(path)
 
-    def rmdir(self, path):
+    @override
+    def rmdir(self, path: str) -> None:
         if not self.isdir(path):
             raise ValueError("Path is not a directory")
         self.rm(path, recursive=False)
 
-    def export(self, path, mime_type):
+    def export(self, path: str, mime_type: str) -> bytes:
         """Convert a google-native file to another format and download
 
         mime_type is something like "text/plain"
@@ -253,7 +269,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             fileId=file_id, mimeType=mime_type, supportsAllDrives=True
         ).execute()
 
-    def _drive_id_from_name(self, name):
+    def _drive_id_from_name(self, name: str) -> str:
         drive = [_["id"] for _ in self.drives if _["name"] == name]
         if len(drive) == 0:
             raise ValueError(f"Drive name {drive} not found")
@@ -262,15 +278,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             raise ValueError(f"Drive name {drive} refers to multiple shared drives")
 
+    @override
     # pyrefly: ignore [bad-override]
-    def ls(self, path, detail=False, trashed=False):
-        path = self._strip_protocol(path)
+    def ls(
+        self, path: str, detail: bool = False, trashed: bool = False
+    ) -> list[dict[str, Any]] | list[str]:
+        path = self._strip_path(path)
         files = self._ls_from_cache(path)
 
         if files is None:
             # get parent ID
             if "/" in path:
-                # pyrefly: ignore [missing-attribute]
                 pref = path.rsplit("/", 1)[0]
                 inf = self.info(pref, trashed=trashed)
                 file_id = inf["id"]
@@ -305,9 +323,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             return sorted([f["name"] for f in files])
 
+    @override
     # pyrefly: ignore [bad-override]
-    def info(self, path, trashed=False):
-        path = self._strip_protocol(path)
+    def info(self, path: str, trashed: bool = False) -> dict[str, Any]:
+        path = self._strip_path(path)
         if path == "":
             return {
                 "name": path,
@@ -318,7 +337,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             }
         return super().info(path, trashed=trashed)
 
-    def _drive_kw(self):
+    def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:
             return dict(
                 includeItemsFromAllDrives=True,
@@ -327,9 +346,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 driveId=self.drive,
             )
         else:
-            return {}
+            return dict[str, Any]()
 
-    def _list_directory_by_id(self, file_id, trashed=False, path_prefix=None):
+    def _list_directory_by_id(
+        self, file_id: str, trashed: bool = False, path_prefix: str | None = None
+    ) -> list[dict[str, Any]]:
         all_files = []
         page_token = None
         afields = "nextPageToken, files(%s)" % fields
@@ -342,17 +363,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         kwargs = self._drive_kw()
         while True:
             logger.debug("%s ; prefix %s", query, path_prefix)
-            response = self.files.list(
-                q=query,
-                spaces=self.spaces,
-                fields=afields,
-                # pyrefly: ignore [bad-argument-type]
-                pageToken=page_token,
-                orderBy="name",
-                pageSize=1000,
-                # pyrefly: ignore [bad-argument-type]
+            list_kwargs: dict[str, Any] = {
+                "q": query,
+                "spaces": self.spaces,
+                "fields": afields,
+                "orderBy": "name",
+                "pageSize": 1000,
                 **kwargs,
-            ).execute()
+            }
+            if page_token is not None:
+                list_kwargs["pageToken"] = page_token
+            response = self.files.list(**list_kwargs).execute()
             for f in response.get("files", []):
                 all_files.append(_finfo_from_response(f, path_prefix))
             page_token = response.get("nextPageToken", None)
@@ -360,8 +381,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 break
         return all_files
 
+    @override
     # pyrefly: ignore [bad-override]
-    def _open(self, path, mode="rb", **kwargs):
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> AbstractBufferedFile:
         return GoogleDriveFile(self, path, mode=mode, **kwargs)
 
 
@@ -369,14 +391,17 @@ DEFAULT_BLOCK_SIZE = 5 * 2**20
 
 
 class GoogleDriveFile(AbstractBufferedFile):
+    location: str | None
+    _media_object: Any | None
+
     def __init__(
         self,
-        fs,
-        path,
-        mode="rb",
-        block_size=DEFAULT_BLOCK_SIZE,
-        autocommit=True,
-        **kwargs,
+        fs: GoogleDriveFileSystem,
+        path: str,
+        mode: str = "rb",
+        block_size: int = DEFAULT_BLOCK_SIZE,
+        autocommit: bool = True,
+        **kwargs: Any,
     ):
         """
         Open a file.
@@ -397,7 +422,8 @@ class GoogleDriveFile(AbstractBufferedFile):
             self.file_id = fs.info(path)["id"]
             self._media_object = None
 
-    def _fetch_range(self, start=None, end=None):
+    @override
+    def _fetch_range(self, start: int | None = None, end: int | None = None) -> bytes:
         """Get data from Google Drive
 
         start, end : None or integers
@@ -423,8 +449,9 @@ class GoogleDriveFile(AbstractBufferedFile):
                 return b""
             raise
 
+    @override
     # pyrefly: ignore [bad-override]
-    def _upload_chunk(self, final=False):
+    def _upload_chunk(self, final: bool = False) -> bool:
         """Write one part of a multi-block file upload
 
         Parameters
@@ -481,12 +508,14 @@ class GoogleDriveFile(AbstractBufferedFile):
             raise IOError
         return True
 
-    def commit(self):
+    @override
+    def commit(self) -> None:
         """If not auto-committing, finalize file"""
         self.autocommit = True
         self._upload_chunk(final=True)
 
-    def _initiate_upload(self):
+    @override
+    def _initiate_upload(self) -> None:
         """Create multi-upload"""
         parent_id = self.fs.info(self.fs._parent(self.path))["id"]
         head = {"Content-Type": "application/json; charset=UTF-8"}
@@ -508,7 +537,8 @@ class GoogleDriveFile(AbstractBufferedFile):
         assert int(head["status"]) < 400, "Init upload failed"
         self.location = r[0]["location"]
 
-    def discard(self):
+    @override
+    def discard(self) -> None:
         """Cancel in-progress multi-upload"""
         if self.location is None:
             logger.debug("Abort file creation %s", self.path)
