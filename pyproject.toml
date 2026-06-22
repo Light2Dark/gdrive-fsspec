@@ -40,11 +40,8 @@ dev = [
 [project.urls]
 Source = "http://github.com/fsspec/gdrive-fsspec"
 
-[tool.setuptools.packages.find]
-include = ["gdrive_fsspec"]
-
 [tool.setuptools_scm]
-version_file = "gdrive_fsspec/_version.py"
+version_file = "src/gdrive_fsspec/_version.py"
 
 [tool.pytest.ini_options]
 addopts = """\

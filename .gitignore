@@ -106,5 +106,5 @@ uv.lock
 # mypy
 .mypy_cache/
 
-/gdrive_fsspec/_version.py
+/src/gdrive_fsspec/_version.py
 /tmp/*
