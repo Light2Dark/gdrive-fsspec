@@ -75,36 +75,66 @@ See ``GoogleDriveFileSystem`` docstring for more details.
 
 ## Development
 
-### Running tests
+### Setup
 
-The tests require defining the following environment variables:
-- gdrive_fsspec_CREDENTIALS_PATH: location of a credentials.json or the json blob itself
- (starting with "{")
-- gdrive_fsspec_CREDENTIALS_TYPE: token type ("service_account" default)
-- gdrive_fsspec_DRIVE: shared drive to use.
+1. Install `uv` and `pre-commit`:
 
-As can be seen, the assumption is, that a service account will be operating
-on a shared drive. This requires the account to be have full shared access to
-the drive.
+- [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)
+- [pre-commit install docs](https://pre-commit.com/#install)
 
-You could use your own personal gdrive too, either by creating a credentials
-JSON, or by using type "cache" following successful browser-based auth.
-
-All tests take place in a directory "gdrive_fsspec_testdir".
+2. Clone your fork and `cd` into the repo:
 
 ```sh
-pip install -e . pytest
-pytest -v
+git clone git@github.com:<your username>/gdrive-fsspec.git
+cd gdrive-fsspec
 ```
 
-### Style
-
-Please run pre-commit before submitting PRs. You can automate this by
-calling
-```bash
-$ pre-commit install
+3. Set up the environment:
+```sh
+uv sync
+pre-commit install
 ```
-in the repo (once) before committing.
+
+### Running tests
+
+There are unit tests and integration tests. Integration tests use a directory
+named `gdrive_fsspec_testdir` on Google Drive.
+
+**Unit tests** mock the Google Drive API and need no credentials. By default,
+`pytest` runs unit tests only:
+
+```sh
+uv run pytest -v
+```
+
+**Integration tests** hit a real Google Drive account:
+
+```sh
+uv run pytest -v -m integration
+```
+
+Set these environment variables before running them:
+
+- `GDRIVE_FSSPEC_CREDENTIALS_PATH` — path to a service-account JSON, or the JSON string (starting with `{`). Required when using `service_account` (the default).
+- `GDRIVE_FSSPEC_CREDENTIALS_TYPE` — token type (`service_account` default; use `cache` or `browser` for user OAuth).
+- `GDRIVE_FSSPEC_DRIVE` — **Shared Drive name**. Required for service-account upload tests.
+
+Service accounts cannot own files in Google Drive and have no storage quota.
+Uploads must target a [Shared Drive](https://developers.google.com/workspace/drive/api/guides/about-shareddrives) where the service account is a member with at least **Contributor** access.
+See [Google’s storage-limit errors](https://developers.google.com/workspace/drive/api/guides/handle-errors#storage-limit).
+
+For a personal Drive (no Shared Drive), use user OAuth instead:
+`GDRIVE_FSSPEC_CREDENTIALS_TYPE=cache` after a one-time `browser` login.
+
+To run all tests, override the default marker filter:
+
+```sh
+uv run pytest -v -m ""
+```
+
+> **Note:** Integration tests do not run on PRs from forks, because those
+> workflows cannot use repository secrets. They run on pushes to `master` and same repo PRs.
+> Google Drive has no good emulator; see [this discussion on why](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
 
 ## Other implementations
 
