@@ -25,6 +25,7 @@ jobs:
 
       - uses: ./.github/actions/setup
 
+      # pyrefly-check uses language: system and expects pyrefly on PATH.
       - name: Run pre-commit
         run: PATH="$PWD/.venv/bin:$PATH" uvx pre-commit run --all-files
 
