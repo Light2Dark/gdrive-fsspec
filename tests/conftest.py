@@ -4,7 +4,7 @@ from gdrive_fsspec import GoogleDriveFileSystem
 
 
 @pytest.fixture()
-def anon_fs():
+def anon_fs() -> GoogleDriveFileSystem:
     # skip_instance_cache keeps each test's dircache isolated; fsspec otherwise
     # returns the same cached instance for identical constructor arguments.
     return GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
