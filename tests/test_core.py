@@ -217,15 +217,29 @@ def test_validate_root_file_id_accepts_folder(validation_fs: MockedDriveFS) -> N
     validation_fs.files.get.return_value.execute.return_value = {
         "id": "folder-id",
         "trashed": False,
+        "mimeType": DIR_MIME_TYPE,
     }
 
     validation_fs.fs._validate_root_file_id("folder-id")
 
     validation_fs.files.get.assert_called_once_with(
         fileId="folder-id",
-        fields="id,trashed",
+        fields="id,trashed,mimeType",
         supportsAllDrives=True,
     )
+
+
+def test_validate_root_file_id_rejects_non_folder(
+    validation_fs: MockedDriveFS,
+) -> None:
+    validation_fs.files.get.return_value.execute.return_value = {
+        "id": "file-id",
+        "trashed": False,
+        "mimeType": "text/plain",
+    }
+
+    with pytest.raises(NotADirectoryError, match="not a folder"):
+        validation_fs.fs._validate_root_file_id("file-id")
 
 
 def test_validate_root_file_id_rejects_trashed_folder(
@@ -234,6 +248,7 @@ def test_validate_root_file_id_rejects_trashed_folder(
     validation_fs.files.get.return_value.execute.return_value = {
         "id": "folder-id",
         "trashed": True,
+        "mimeType": DIR_MIME_TYPE,
     }
 
     with pytest.raises(FileNotFoundError, match="trashed"):

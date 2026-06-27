@@ -145,7 +145,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         try:
             meta = self.files.get(
                 fileId=root_file_id,
-                fields="id,trashed",
+                fields="id,trashed,mimeType",
                 supportsAllDrives=True,
             ).execute()
         except HttpError as err:
@@ -156,6 +156,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         if meta.get("trashed"):
             raise FileNotFoundError(f"root_file_id {root_file_id!r} is trashed")
+        if meta.get("mimeType") != DIR_MIME_TYPE:
+            raise NotADirectoryError(f"root_file_id {root_file_id!r} is not a folder")
 
     def _confirm_shared_drive_root(self, drive_id: str) -> None:
         """Accept a shared-drive ID passed as ``root_file_id`` (legacy).
@@ -174,6 +176,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise
         if self.drive is None:
             self.drive = drive_id
+        # TODO(follow-up, issue #2): when self.drive is already set to a different
+        # drive, root_file_id and _drive_kw() scope to conflicting drives. This is
+        # pre-existing behaviour; raise on the conflict instead of silently ignoring.
 
     def connect(self, method: AuthMethod | None = None) -> None:
         if method == "browser":
