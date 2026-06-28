@@ -368,18 +368,17 @@ def test_drives_paginates(mocked_fs: MockedDriveFS) -> None:
     assert fs.drives == [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]
 
 
-def test_export_raises_without_path_to_file_id(
-    anon_fs: GoogleDriveFileSystem,
-) -> None:
-    with pytest.raises(AttributeError):
-        anon_fs.export("doc.gdoc", "text/plain")
-
-
+@pytest.mark.xfail(
+    reason="export() calls self.path_to_file_id, which does not exist; "
+    "it should resolve the id via self.info(path)['id'] like rm_file/ls",
+    strict=True,
+    raises=AttributeError,
+)
 def test_export_calls_files_export_when_path_resolves(
     mocked_fs: MockedDriveFS,
 ) -> None:
     fs = mocked_fs.fs
-    fs.path_to_file_id = mock.Mock(return_value="doc-id")  # pyrefly: ignore [missing-attribute]
+    fs.info = mock.Mock(return_value={"id": "doc-id"})
     mocked_fs.files.export.return_value.execute.return_value = b"exported"
 
     result = fs.export("doc.gdoc", "text/plain")

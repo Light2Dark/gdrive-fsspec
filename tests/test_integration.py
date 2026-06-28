@@ -17,9 +17,9 @@ from conftest import TESTDIR, FsFactory
 
 from gdrive_fsspec.core import GoogleDriveFileSystem
 
-# Listing cache can be stale or wrong after writes/deletes; see issues.md #27.
+# Listing cache can be stale or wrong after writes/deletes.
 DIRCACHE_XFAIL = pytest.mark.xfail(
-    reason="dircache not updated correctly after mutations (issues.md #27)",
+    reason="dircache not updated correctly after mutations",
     strict=True,
 )
 
@@ -220,7 +220,7 @@ def test_shared_drive_root_lists(
 
 @pytest.mark.integration
 def test_info_returns_directory_for_root(fs: GoogleDriveFileSystem) -> None:
-    info = fs.info(TESTDIR)
+    info = fs.info("")
     assert info["type"] == "directory"
     assert info["size"] == 0
-    assert "id" in info
+    assert info["id"] == fs.root_file_id

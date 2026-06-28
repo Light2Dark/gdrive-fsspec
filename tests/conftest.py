@@ -99,9 +99,9 @@ def make_fs() -> Generator[FsFactory, None, None]:
     """
     config = DriveConfig.from_env()
     if not config.configured:
-        if config.token == "service_account":
-            pytest.skip("GDRIVE_FSSPEC_CREDENTIALS_PATH not set")
-        pytest.skip("Google Drive credentials not configured")
+        # Only service-account auth can be unconfigured (missing creds path);
+        # other token types are always considered configured.
+        pytest.skip("GDRIVE_FSSPEC_CREDENTIALS_PATH not set")
 
     created: list[GoogleDriveFileSystem] = []
 
