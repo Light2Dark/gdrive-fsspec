@@ -96,7 +96,7 @@ See the ``GoogleDriveFileSystem`` docstring for `root_file_id`, `access`, `space
 
 ```sh
 pip install gdrive_fsspec
-pip install git+https://github.com/fsspec/gdrive-fsspec
+pip install git+https://github.com/Light2Dark/gdrive-fsspec
 ```
 
 ## Contributing

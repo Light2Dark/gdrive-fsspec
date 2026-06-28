@@ -83,3 +83,14 @@ uv run pytest -v -m ""
 ```
 
 > **Note:** Integration tests do not run on PRs from forks, because those workflows cannot use repository secrets. They run on pushes to `master` and same-repo PRs. Google Drive has no good emulator; see [this discussion](https://github.com/fsspec/gdrive-fsspec/issues/23#issuecomment-2030367587).
+
+
+### Creating a service account
+
+1. Enable Google Drive API for the project in the Google Cloud Console.
+2. Create a new service account.
+3. Grant the service account permissions (likely Editor role, as there is no fine-grained Drive permissions).
+4. Create a new key and download the JSON file.
+
+5. To add a shared drive to the service account, get the service account email.
+6. From the shared drive, add the service account email as a member with at least Contributor access.
