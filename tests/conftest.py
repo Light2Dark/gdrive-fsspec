@@ -30,15 +30,22 @@ class MockedDriveFS(NamedTuple):
     fs: GoogleDriveFileSystem
     files: mock.Mock
     service: mock.Mock
+    authed_http: mock.Mock
 
 
 @pytest.fixture()
 def mocked_fs(anon_fs: GoogleDriveFileSystem) -> MockedDriveFS:
     files = mock.Mock()
     service = mock.Mock()
+    authed_http = mock.Mock()
+    # Raw resumable-upload calls go through fs.authed_http.request; the
+    # discovery client's files()._http points at the same transport so tests
+    # can assert on either handle interchangeably.
+    files._http = authed_http
     anon_fs.files = files
     anon_fs.service = service
-    return MockedDriveFS(anon_fs, files, service)
+    anon_fs.authed_http = authed_http
+    return MockedDriveFS(anon_fs, files, service, authed_http)
 
 
 @pytest.fixture()

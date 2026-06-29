@@ -5,17 +5,18 @@ import json
 import logging
 import os
 import pathlib
-import re
 import warnings
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
 
+import httplib2
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials, Credentials
 from google.oauth2 import service_account
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, build_http
 
 from .types import FileInfo
 from .typing_utils import override
@@ -61,6 +62,16 @@ FIELDS = ",".join(
 def _normalize_path(prefix: str, name: str) -> str:
     raw_prefix = prefix.strip("/")
     return "/" + "/".join([raw_prefix, name])
+
+
+def _parse_range_end(range_header: str | None) -> int | None:
+    """Last stored byte index from a resumable ``Range: bytes=0-<end>`` header."""
+    if not range_header or "-" not in range_header:
+        return None
+    try:
+        return int(range_header.rsplit("-", 1)[1])
+    except ValueError:
+        return None
 
 
 def _finfo_from_response(
@@ -111,6 +122,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     if TYPE_CHECKING:
         service: DriveResource
         files: FilesResource
+        authed_http: AuthorizedHttp
 
     def __init__(
         self,
@@ -246,7 +258,15 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             cred = self._connect_service_account()
         else:
             raise ValueError(f"Invalid connection method `{method}`.")
-        self.service = build("drive", "v3", credentials=cred)
+
+        # Own the authenticated transport explicitly. Sharing the transport
+        # keeps credential refresh and connection state in one place.
+        self.authed_http = AuthorizedHttp(cred, http=build_http())
+
+        # AuthorizedHttp duck-types as httplib2.Http (this is exactly what
+        # googleapiclient passes internally), but the stubs only accept Http.
+        # pyrefly: ignore [no-matching-overload]
+        self.service = build("drive", "v3", http=self.authed_http)
         self.files = self.service.files()
 
     @property
@@ -803,9 +823,31 @@ class GoogleDriveFile(AbstractBufferedFile):
                 return b""
             raise
 
+    def _authed_request(
+        self,
+        uri: str,
+        method: str,
+        *,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[httplib2.Response, bytes]:
+        """
+        Make an authenticated raw request via the owned transport.
+        Wraps ``fs.authed_http.request`` to make it typed.
+        """
+        response, content = self.fs.authed_http.request(
+            uri, method=method, body=body, headers=headers
+        )
+        return response, content
+
     @override
-    def _upload_chunk(self, final: bool = False) -> None:
+    # pyrefly: ignore [bad-override]  # fsspec leaves the base method unannotated
+    def _upload_chunk(self, final: bool = False) -> bool:
         """Upload one chunk of a resumable multi-part upload.
+
+        Returns ``False`` (fsspec's "buffer not fully consumed" signal) when the
+        server accepted only part of the buffer; ``True`` once it accepted all of
+        it. See :meth:`_consume_accepted` for the partial-acceptance handling.
 
         Args:
             final: If True, finalize and commit the upload.
@@ -836,16 +878,16 @@ class GoogleDriveFile(AbstractBufferedFile):
         head.update(
             {"Content-Type": "application/octet-stream", "Content-Length": str(length)}
         )
-        req = self.fs.files._http.request
-        head, body = req(
+        response, body = self._authed_request(
             # pyrefly: ignore [unsupported-operation]
             self.location + "&supportsAllDrives=true",
-            method="PUT",
+            "PUT",
             body=data,
             headers=head,
         )
-        status = int(head["status"])
-        assert status < 400, "Init upload failed"
+        status = int(response["status"])
+        if status >= 400:
+            raise IOError(f"Chunk upload failed with status {status}")
         if status in [200, 201]:
             # server thinks we are finished - this should happen
             # only when closing
@@ -864,10 +906,42 @@ class GoogleDriveFile(AbstractBufferedFile):
                         break
                 else:
                     listing.append(info)
-        elif "range" in head:
-            assert status == 308
-        else:
-            raise IOError
+            return True
+        if status != 308:
+            raise IOError(f"Unexpected resumable status {status}")
+        return self._consume_accepted(data, response.get("range"))
+
+    def _consume_accepted(self, data: bytes | None, range_header: str | None) -> bool:
+        """Reconcile a 308 response with what the server actually stored.
+
+        Google accepts intermediate data only up to a 256 KiB-aligned boundary
+        and reports the last stored byte in ``Range: bytes=0-<end>``. Any bytes
+        past that boundary were dropped, so re-buffer them for the next chunk.
+
+        Returns True if the whole buffer was accepted (fsspec then advances
+        ``offset`` and clears the buffer), or False if a tail was re-buffered
+        here (so fsspec must not advance ``offset`` past it).
+        """
+        if data is None:
+            # Empty finalizing PUT; nothing to reconcile.
+            return True
+        offset = self.offset or 0
+        stored_end = _parse_range_end(range_header)
+        # A 308 with no/garbled Range means the server persisted nothing yet, so
+        # the whole buffer must be re-sent. ``accepted`` is bytes stored from
+        # this buffer; the server should never report an end behind our offset.
+        accepted = 0 if stored_end is None else stored_end + 1 - offset
+        if accepted < 0 or accepted > len(data):
+            raise IOError(
+                f"Server reported {accepted} accepted bytes outside the "
+                f"{len(data)}-byte chunk at offset {offset}"
+            )
+        if accepted == len(data):
+            return True
+        self.buffer = io.BytesIO(data[accepted:])
+        self.buffer.seek(0, 2)  # position at end for further writes
+        self.offset = offset + accepted
+        return False
 
     @override
     def commit(self) -> None:
@@ -887,46 +961,57 @@ class GoogleDriveFile(AbstractBufferedFile):
         fsspec streams blocks of unknown total size, so we manage the resumable session
         manually instead. https://developers.google.com/workspace/drive/api/guides/manage-uploads#resumable
         """
-        head = {"Content-Type": "application/json; charset=UTF-8"}
-        req = self.fs.files._http.request  # partial with correct creds
+        headers = {"Content-Type": "application/json; charset=UTF-8"}
         query = "?uploadType=resumable&supportsAllDrives=true"
         # also allows description, MIME type, version, thumbnail...
         if self.file_id is not None:
             # Update the existing file in place. ``name``/``parents`` are
             # already set on the resource, so an empty body suffices.
-            body = json.dumps({}).encode()
-            r = req(
+            response, _ = self._authed_request(
                 f"{UPLOAD_URL}/{self.file_id}{query}",
-                method="PATCH",
-                headers=head,
-                body=body,
+                "PATCH",
+                headers=headers,
+                body=json.dumps({}).encode(),
             )
         else:
             parent_id = self.fs.info(self.fs._parent(self.path))["id"]
-            body = json.dumps(
-                {"name": self.path.rsplit("/", 1)[-1], "parents": [parent_id]}
-            ).encode()
-            r = req(
+            response, _ = self._authed_request(
                 f"{UPLOAD_URL}{query}",
-                method="POST",
-                headers=head,
-                body=body,
+                "POST",
+                headers=headers,
+                body=json.dumps(
+                    {"name": self.path.rsplit("/", 1)[-1], "parents": [parent_id]}
+                ).encode(),
             )
-        head = r[0]
-        assert int(head["status"]) < 400, "Init upload failed"
-        self.location = r[0]["location"]
+        status = int(response["status"])
+        if status >= 400:
+            raise IOError(f"Init upload failed with status {status}")
+        self.location = response["location"]
 
     @override
     def discard(self) -> None:
-        """Cancel an in-progress resumable upload."""
+        """Cancel an in-progress resumable upload.
+
+        Issues a ``DELETE`` against the session URI returned by
+        :meth:`_initiate_upload`, mirroring the other resumable-upload calls
+        rather than reconstructing the endpoint. Google replies ``499`` to a
+        successful cancellation, so that status is accepted alongside ``<400``.
+        See https://developers.google.com/workspace/drive/api/guides/manage-uploads#cancel-upload
+        """
         if self.location is None:
             LOGGER.debug("Abort file creation %s", self.path)
             return
         LOGGER.debug("Cancel file creation %s", self.path)
-        uid = re.findall("upload_id=([^&=?]+)", self.location)
-        head, _ = self.fs._call(
+        location = self.location
+        if "supportsAllDrives" not in location:
+            sep = "&" if "?" in location else "?"
+            location = f"{location}{sep}supportsAllDrives=true"
+        response, _ = self._authed_request(
+            location,
             "DELETE",
-            UPLOAD_URL,
-            params={"uploadType": "resumable", "upload_id": uid},
+            headers={"Content-Length": "0"},
         )
-        assert int(head["status"]) < 400, "Cancel upload failed"
+        status = int(response["status"])
+        if not (status < 400 or status == 499):
+            raise IOError(f"Cancel upload failed with status {status}")
+        self.location = None

@@ -60,9 +60,10 @@ def test_upload_chunk_without_parent_dircache() -> None:
         token="anon", skip_instance_cache=True, use_listings_cache=False
     )
     fs.files = mock.Mock()
+    fs.authed_http = mock.Mock()
     # New file: the path does not exist yet.
     fs.info = mock.Mock(side_effect=FileNotFoundError("parent/file.txt"))
-    fs.files._http.request.return_value = (
+    fs.authed_http.request.return_value = (
         {"status": "200"},
         json.dumps({"id": "file-id", "name": "file.txt", "size": "4"}).encode(),
     )
@@ -72,7 +73,8 @@ def test_upload_chunk_without_parent_dircache() -> None:
     file.offset = 0
 
     try:
-        assert file._upload_chunk(final=True) is None
+        # A fully-accepted final chunk (HTTP 200) reports completion as True.
+        assert file._upload_chunk(final=True) is True
     finally:
         file.closed = True
 

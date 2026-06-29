@@ -13,6 +13,7 @@ from gdrive_fsspec.core import (
     GoogleDriveFile,
     GoogleDriveFileSystem,
     MultipleFilesError,
+    _parse_range_end,
 )
 
 
@@ -206,6 +207,133 @@ def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:
     assert headers["Content-Range"] == "bytes 0-999/*"
 
 
+def test_upload_chunk_partial_accept_keeps_unsent_tail(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    """Google accepts intermediate data only up to a 256 KiB boundary.
+
+    When the server stores fewer bytes than were sent (308 with a ``Range``
+    short of the buffer end), the unaccepted tail must stay buffered and
+    ``offset`` must track the server, otherwise the upload silently never
+    completes. The method returns False so fsspec does not advance past the
+    tail itself.
+    """
+    fs = mocked_fs.fs
+    # Sent 1000 bytes from offset 0; server stored only 0-599 (600 bytes).
+    mocked_fs.authed_http.request.return_value = (
+        {"status": "308", "range": "bytes=0-599"},
+        b"",
+    )
+    file = _write_file(fs)
+    file.write(b"y" * 1000)
+    file.offset = 0
+
+    try:
+        result = file._upload_chunk(final=False)
+    finally:
+        file.closed = True
+
+    # _upload_chunk parsed the 308, delegated to _consume_accepted, and
+    # propagated its result: the tail stays buffered and offset tracks the
+    # server. (Branch-level cases are covered directly below.)
+    assert result is False
+    assert file.offset == 600
+    assert file.buffer.tell() == 400
+    file.buffer.seek(0)
+    assert file.buffer.read() == b"y" * 400
+
+
+# ---------------------------------------------------------------------------
+# Granular, transport-free tests for the 308 reconciliation helper. These call
+# _consume_accepted directly so each branch is exercised in isolation, without
+# the _upload_chunk / mocked-transport scaffolding above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        ("bytes=0-499", 499),  # canonical resumable form
+        ("0-499", 499),  # bare form (some responses omit the unit)
+        ("bytes=0-0", 0),  # a single stored byte
+        (None, None),  # no header
+        ("", None),  # empty header
+        ("bytes=*", None),  # no dash
+        ("bytes=0-notanint", None),  # garbled end
+    ],
+)
+def test_parse_range_end(header: str | None, expected: int | None) -> None:
+    assert _parse_range_end(header) == expected
+
+
+def _consume(
+    fs: GoogleDriveFileSystem, data: bytes | None, header: str | None, offset: int
+) -> tuple[bool, GoogleDriveFile]:
+    """Run _consume_accepted on a fresh file at ``offset`` and return its result."""
+    file = _write_file(fs)
+    file.offset = offset
+    try:
+        result = file._consume_accepted(data, header)
+    finally:
+        file.closed = True
+    return result, file
+
+
+def test_consume_accepted_none_data_returns_true(mocked_fs: MockedDriveFS) -> None:
+    """An empty finalizing PUT (data=None) has nothing to reconcile."""
+    result, _ = _consume(mocked_fs.fs, None, "bytes=0-9", offset=10)
+    assert result is True
+
+
+def test_consume_accepted_full_accept_returns_true(mocked_fs: MockedDriveFS) -> None:
+    result, file = _consume(mocked_fs.fs, b"x" * 100, "bytes=0-99", offset=0)
+    assert result is True
+
+
+def test_consume_accepted_partial_keeps_tail(mocked_fs: MockedDriveFS) -> None:
+    result, file = _consume(mocked_fs.fs, b"x" * 100, "bytes=0-59", offset=0)
+    assert result is False
+    assert file.offset == 60
+    file.buffer.seek(0)
+    assert file.buffer.read() == b"x" * 40
+
+
+def test_consume_accepted_partial_at_nonzero_offset(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    """Accounting is relative to the chunk's starting offset, not absolute 0."""
+    # Chunk covers bytes 1000..1099; server stored through 1049 → 50 accepted.
+    result, file = _consume(mocked_fs.fs, b"y" * 100, "bytes=0-1049", offset=1000)
+    assert result is False
+    assert file.offset == 1050
+    file.buffer.seek(0)
+    assert file.buffer.read() == b"y" * 50
+
+
+def test_consume_accepted_no_range_rebuffers_all(mocked_fs: MockedDriveFS) -> None:
+    """A 308 without a Range header means nothing was stored; re-send all."""
+    result, file = _consume(mocked_fs.fs, b"z" * 100, None, offset=0)
+    assert result is False
+    assert file.offset == 0
+    file.buffer.seek(0)
+    assert file.buffer.read() == b"z" * 100
+
+
+def test_consume_accepted_end_behind_offset_raises(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    """Server reporting a stored end behind the chunk start → negative accepted."""
+    with pytest.raises(IOError, match="accepted"):
+        _consume(mocked_fs.fs, b"z" * 100, "bytes=0-499", offset=600)
+
+
+def test_consume_accepted_over_report_raises(mocked_fs: MockedDriveFS) -> None:
+    """Server claiming more stored than we sent in this chunk is a protocol error."""
+    # offset 0, chunk is 100 bytes, but server says it stored through byte 999.
+    with pytest.raises(IOError, match="accepted"):
+        _consume(mocked_fs.fs, b"z" * 100, "bytes=0-999", offset=0)
+
+
 def test_upload_chunk_final_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.dircache["parent"] = empty_listing()
@@ -301,7 +429,7 @@ def test_upload_chunk_unexpected_status_raises(mocked_fs: MockedDriveFS) -> None
     file.write(b"data")
     file.offset = 0
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(IOError):
         try:
             file._upload_chunk(final=False)
         finally:
@@ -341,8 +469,6 @@ def test_commit_finalizes_upload(mocked_fs: MockedDriveFS) -> None:
 
 def test_discard_noop_without_location(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    call_mock = mock.Mock()
-    fs._call = call_mock  # pyrefly: ignore [missing-attribute]
     file = _write_file(fs)
     file.location = None
 
@@ -351,13 +477,12 @@ def test_discard_noop_without_location(mocked_fs: MockedDriveFS) -> None:
     finally:
         file.closed = True
 
-    call_mock.assert_not_called()
+    mocked_fs.files._http.request.assert_not_called()
 
 
 def test_discard_cancels_resumable_upload(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    call_mock = mock.Mock(return_value=({"status": "204"}, b""))
-    fs._call = call_mock  # pyrefly: ignore [missing-attribute]
+    mocked_fs.files._http.request.return_value = ({"status": "204"}, b"")
     file = _write_file(fs)
     file.location = "https://upload.example/resume?upload_id=abc123"
 
@@ -366,8 +491,73 @@ def test_discard_cancels_resumable_upload(mocked_fs: MockedDriveFS) -> None:
     finally:
         file.closed = True
 
-    call_mock.assert_called_once_with(
-        "DELETE",
-        "https://www.googleapis.com/upload/drive/v3/files",
-        params={"uploadType": "resumable", "upload_id": ["abc123"]},
+    args, kwargs = mocked_fs.files._http.request.call_args
+    assert args[0] == (
+        "https://upload.example/resume?upload_id=abc123&supportsAllDrives=true"
     )
+    assert kwargs["method"] == "DELETE"
+    # Session URI is cleared so a later close() does not re-cancel.
+    assert file.location is None
+
+
+def test_discard_keeps_existing_supports_all_drives(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    mocked_fs.files._http.request.return_value = ({"status": "204"}, b"")
+    file = _write_file(fs)
+    file.location = (
+        "https://upload.example/resume?upload_id=abc123&supportsAllDrives=true"
+    )
+
+    try:
+        file.discard()
+    finally:
+        file.closed = True
+
+    # The flag is already present; do not append a duplicate.
+    args, _ = mocked_fs.files._http.request.call_args
+    assert args[0].count("supportsAllDrives") == 1
+
+
+def test_discard_accepts_http_499(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # Google replies 499 to a successful resumable-upload cancellation.
+    mocked_fs.files._http.request.return_value = ({"status": "499"}, b"")
+    file = _write_file(fs)
+    file.location = "https://upload.example/resume?upload_id=abc123"
+
+    try:
+        file.discard()
+    finally:
+        file.closed = True
+
+    assert file.location is None
+
+
+def test_discard_raises_on_failure(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    mocked_fs.files._http.request.return_value = ({"status": "500"}, b"error")
+    file = _write_file(fs)
+    file.location = "https://upload.example/resume?upload_id=abc123"
+
+    with pytest.raises(IOError):
+        try:
+            file.discard()
+        finally:
+            file.closed = True
+
+
+def test_transaction_rollback_discards_once(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    file = _write_file(fs)
+    tx = fs.transaction
+    tx.start()
+    tx.files.append(file)
+
+    with mock.patch.object(file, "discard") as discard:
+        # A failed transaction rolls back via complete(commit=False).
+        tx.complete(commit=False)
+
+    discard.assert_called_once_with()
+    file.closed = True
