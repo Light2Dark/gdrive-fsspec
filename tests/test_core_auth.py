@@ -167,3 +167,22 @@ def test_service_account_passes_auth_kwargs() -> None:
             )
 
     assert from_info.call_args.kwargs["quota_project_id"] == "my-project"
+
+
+def test_connect_owns_authed_http_and_shares_with_build() -> None:
+    fs = GoogleDriveFileSystem(token="anon", skip_instance_cache=True)
+    sentinel = mock.Mock()
+
+    with mock.patch(
+        "gdrive_fsspec.core.AuthorizedHttp", return_value=sentinel
+    ) as authed:
+        with mock.patch("gdrive_fsspec.core.build") as build:
+            fs.connect(method="anon")
+
+    # The filesystem owns its own AuthorizedHttp built from the credentials...
+    authed.assert_called_once()
+    assert fs.authed_http is sentinel
+    # ...and hands that same transport to the discovery client so raw
+    # resumable-upload requests and the client share one connection/creds.
+    assert build.call_args.kwargs["http"] is sentinel
+    assert "credentials" not in build.call_args.kwargs

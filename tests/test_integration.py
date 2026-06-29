@@ -12,10 +12,12 @@
 #     GDRIVE_FSSPEC_DRIVE=optional-shared-drive-name
 # ---------------------------------------------------------------------------
 
+from typing import cast
+
 import pytest
 from conftest import TESTDIR, FsFactory
 
-from gdrive_fsspec.core import GoogleDriveFileSystem
+from gdrive_fsspec.core import GoogleDriveFile, GoogleDriveFileSystem
 
 # Listing cache can be stale or wrong after writes/deletes.
 DIRCACHE_XFAIL = pytest.mark.xfail(
@@ -186,15 +188,86 @@ def test_read_with_seek(fs: GoogleDriveFileSystem) -> None:
         assert f.read(2) == b"89"
 
 
-# @pytest.mark.integration
-# def test_multiblock_upload(fs: GoogleDriveFileSystem) -> None:
-#     """Exercise resumable upload with a small block size (not the 5 MiB default)."""
-#     data = b"x" * 5000
-#     fn = _test_path("multiblock")
-#     with fs.open(fn, "wb", block_size=1024) as f:
-#         f.write(data)
+@pytest.mark.integration
+def test_multiblock_upload(fs: GoogleDriveFileSystem) -> None:
+    """Resumable upload across multiple chunks.
 
-#     assert fs.cat(fn) == data
+    With the 5 MiB default block size every write fits in a single chunk, so
+    the 308-continuation loop in ``_upload_chunk`` (and its ``Content-Range:
+    bytes X-Y/*`` wildcard) is otherwise never exercised live. A small block
+    size forces several chunks plus the final commit.
+    """
+    # Several full blocks plus a partial trailing block.
+    block_size = 256 * 1024  # minimum Drive accepts is a 256 KiB multiple
+    data = b"abcd" * (block_size // 4 * 3 + 7)
+    fn = _test_path("multiblock")
+    with fs.open(fn, "wb", block_size=block_size) as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(data)
+
+    assert fs.cat(fn) == data
+    assert fs.info(fn)["size"] == len(data)
+
+
+@pytest.mark.integration
+def test_transaction_rollback_discards_upload(fs: GoogleDriveFileSystem) -> None:
+    """A failed transaction cancels an in-progress resumable upload.
+
+    This is the path that was previously broken: rollback calls
+    ``GoogleDriveFile.discard()``, which issues the resumable-session DELETE.
+    The upload must have actually started (a block flushed, so a session URI
+    exists) for the cancel to do real work, hence the small block size and a
+    payload larger than one block.
+    """
+    block_size = 256 * 1024
+    data = b"z" * (block_size * 2)
+    fn = _test_path("rolled_back")
+
+    class Boom(RuntimeError):
+        pass
+
+    with pytest.raises(Boom):
+        with fs.transaction:
+            f = cast(
+                GoogleDriveFile,
+                fs.open(fn, "wb", block_size=block_size, autocommit=False),
+            )
+            try:
+                f.write(data)  # flushes ≥1 block → opens the resumable session
+                assert f.location is not None, "expected an open upload session"
+                raise Boom("abort before commit")
+            finally:
+                f.closed = True
+
+    # The aborted upload must not have produced a committed file.
+    fs.invalidate_cache()
+    assert not fs.exists(fn)
+
+
+@pytest.mark.integration
+def test_discard_after_partial_write(fs: GoogleDriveFileSystem) -> None:
+    """Directly cancelling a started upload leaves no committed file.
+
+    Exercises ``discard()`` end-to-end against the live API (DELETE on the
+    session URI, accepting Google's 499) without relying on the transaction
+    machinery.
+    """
+    block_size = 256 * 1024
+    fn = _test_path("discarded")
+    f = cast(
+        GoogleDriveFile,
+        fs.open(fn, "wb", block_size=block_size, autocommit=False),
+    )
+    try:
+        f.write(b"q" * (block_size + 1))  # start the session
+        assert f.location is not None
+        f.discard()
+        assert f.location is None  # cleared after a successful cancel
+    finally:
+        f.closed = True
+
+    fs.invalidate_cache()
+    assert not fs.exists(fn)
 
 
 @pytest.mark.integration
