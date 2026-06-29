@@ -40,6 +40,73 @@ def test_simple(fs: GoogleDriveFileSystem) -> None:
 
 
 @pytest.mark.integration
+def test_overwrite_updates_in_place(fs: GoogleDriveFileSystem) -> None:
+    """Writing to an existing path updates it instead of creating a duplicate."""
+    filename = _test_path("overwrite")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"first")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"second longer content")
+
+    fs.invalidate_cache()
+    entries = fs.ls(TESTDIR, detail=True)
+    match = [e for e in entries if e["name"] == filename]
+    assert len(match) == 1, "overwrite created a duplicate child"
+    assert fs.cat(filename) == b"second longer content"
+
+
+@pytest.mark.integration
+def test_overwrite_preserves_file_id(fs: GoogleDriveFileSystem) -> None:
+    """Overwrite PATCHes the existing file rather than delete-and-recreate."""
+    filename = _test_path("overwrite_id")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"v1")
+    fs.invalidate_cache()
+    original_id = fs.info(filename)["id"]
+
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"v2")
+    fs.invalidate_cache()
+
+    assert fs.info(filename)["id"] == original_id
+    assert fs.cat(filename) == b"v2"
+
+
+@pytest.mark.integration
+@DIRCACHE_XFAIL
+def test_overwrite_updates_live_dircache(fs: GoogleDriveFileSystem) -> None:
+    """The live dircache reflects an overwrite without re-listing.
+
+    Exercises the in-place dircache update on commit: ``ls`` populates the
+    cache, the overwrite must replace that entry (not append a second one).
+
+    Currently xfails on the broader dircache-drift bug: ``ls`` on a directory
+    whose parent is already cached never caches that directory's own children,
+    so the commit-time update has no entry to replace. The server-state tests
+    above confirm the overwrite itself is correct.
+    """
+    filename = _test_path("overwrite_cache")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"one")
+    # Populate the dircache for the parent.
+    fs.ls(TESTDIR, detail=True)
+
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"two!")
+
+    entries = fs.ls(TESTDIR, detail=True)  # served from cache
+    match = [e for e in entries if e["name"] == filename]
+    assert len(match) == 1
+    assert match[0]["size"] == 4
+
+
+@pytest.mark.integration
 def test_create_directory(fs: GoogleDriveFileSystem) -> None:
     fs.makedirs(_test_path("data"))
     fs.makedirs(_test_path("data/bar/baz"))

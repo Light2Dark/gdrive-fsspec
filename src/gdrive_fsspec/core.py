@@ -38,6 +38,9 @@ SCOPE_DICT = {
 # https://developers.google.com/workspace/drive/api/guides/mime-types
 DIR_MIME_TYPE = "application/vnd.google-apps.folder"
 
+# Base URL for resumable uploads.
+UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+
 # File resource fields; partial-response mask for files.list / files.get:
 # https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource
 # https://developers.google.com/workspace/drive/api/guides/performance#partial
@@ -736,12 +739,35 @@ class GoogleDriveFile(AbstractBufferedFile):
             block_size: Buffer size for reading or writing (default 5 MiB).
             autocommit: If True, commit the upload when the file is closed.
             **kwargs: Passed to :class:`AbstractBufferedFile`.
+
+        Raises:
+            IsADirectoryError: If ``mode`` is ``"wb"`` and ``path`` is an
+                existing directory.
+            MultipleFilesError: If ``path`` already resolves to multiple files.
         """
         path = fs._path_str(path)
+
+        existing_id: str | None = None
+        if mode == "wb":
+            # If the path already exists, remember its id so the upload PATCHes
+            # the existing file instead of creating an identically-named
+            # duplicate.
+            try:
+                existing: FileInfo = cast(FileInfo, fs.info(path))
+            except MultipleFilesError:
+                raise
+            except FileNotFoundError:
+                pass
+            else:
+                if existing["type"] == "directory":
+                    raise IsADirectoryError(path)
+                existing_id = existing["id"]
+
         super().__init__(fs, path, mode, block_size, autocommit=autocommit, **kwargs)
 
         if mode == "wb":
             self.location = None
+            self.file_id: str | None = existing_id
         else:
             self.file_id = fs.info(path)["id"]
             self._media_object: Any | None = None
@@ -825,12 +851,19 @@ class GoogleDriveFile(AbstractBufferedFile):
             # only when closing
             blob = json.loads(body.decode())
             self.file_id = blob["id"]
-            par = self.fs._parent(self.path)
-            # duplicate should not happen here, and parent should already exist
-            info = _finfo_from_response(blob, path_prefix=par)
+            parent = self.fs._parent(self.path)
+            info = _finfo_from_response(blob, path_prefix=parent)
             info["size"] = self.tell()
-            if par in self.fs.dircache:
-                self.fs.dircache[par].append(info)
+            if parent in self.fs.dircache:
+                listing = self.fs.dircache[parent]
+                # Update the existing entry in place when overwriting, so the
+                # parent listing keeps exactly one entry per path.
+                for i, existing in enumerate(listing):
+                    if existing["name"] == info["name"]:
+                        listing[i] = info
+                        break
+                else:
+                    listing.append(info)
         elif "range" in head:
             assert status == 308
         else:
@@ -844,23 +877,41 @@ class GoogleDriveFile(AbstractBufferedFile):
 
     @override
     def _initiate_upload(self) -> None:
-        """Start a resumable upload session for a new file."""
-        parent_id = self.fs.info(self.fs._parent(self.path))["id"]
+        """Start a resumable upload session.
+
+        If the path already exists, the existing file is updated in place via
+        PATCH. Otherwise, a new file is created via POST.
+
+        The discovery client's files.create/update
+        can only drive resumable uploads from a fully seekable source (MediaFileUpload);
+        fsspec streams blocks of unknown total size, so we manage the resumable session
+        manually instead. https://developers.google.com/workspace/drive/api/guides/manage-uploads#resumable
+        """
         head = {"Content-Type": "application/json; charset=UTF-8"}
-        # also allows description, MIME type, version, thumbnail...
-        body = json.dumps(
-            {"name": self.path.rsplit("/", 1)[-1], "parents": [parent_id]}
-        ).encode()
         req = self.fs.files._http.request  # partial with correct creds
-        # TODO : this creates a new file. If the file exists, you should
-        #   update it by getting the ID and using PATCH, or delete and recreate,
-        #   else you get two identically-named files
-        r = req(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
-            method="POST",
-            headers=head,
-            body=body,
-        )
+        query = "?uploadType=resumable&supportsAllDrives=true"
+        # also allows description, MIME type, version, thumbnail...
+        if self.file_id is not None:
+            # Update the existing file in place. ``name``/``parents`` are
+            # already set on the resource, so an empty body suffices.
+            body = json.dumps({}).encode()
+            r = req(
+                f"{UPLOAD_URL}/{self.file_id}{query}",
+                method="PATCH",
+                headers=head,
+                body=body,
+            )
+        else:
+            parent_id = self.fs.info(self.fs._parent(self.path))["id"]
+            body = json.dumps(
+                {"name": self.path.rsplit("/", 1)[-1], "parents": [parent_id]}
+            ).encode()
+            r = req(
+                f"{UPLOAD_URL}{query}",
+                method="POST",
+                headers=head,
+                body=body,
+            )
         head = r[0]
         assert int(head["status"]) < 400, "Init upload failed"
         self.location = r[0]["location"]
@@ -875,7 +926,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         uid = re.findall("upload_id=([^&=?]+)", self.location)
         head, _ = self.fs._call(
             "DELETE",
-            "https://www.googleapis.com/upload/drive/v3/files",
+            UPLOAD_URL,
             params={"uploadType": "resumable", "upload_id": uid},
         )
         assert int(head["status"]) < 400, "Cancel upload failed"
