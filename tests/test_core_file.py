@@ -8,7 +8,11 @@ import pytest
 from conftest import MockedDriveFS, empty_headers, empty_listing
 from googleapiclient.errors import HttpError
 
-from gdrive_fsspec.core import GoogleDriveFile, GoogleDriveFileSystem
+from gdrive_fsspec.core import (
+    GoogleDriveFile,
+    GoogleDriveFileSystem,
+    MultipleFilesError,
+)
 
 
 def _http_error(message: str) -> HttpError:
@@ -19,7 +23,24 @@ def _http_error(message: str) -> HttpError:
 def _write_file(
     fs: GoogleDriveFileSystem,
     path: str = "parent/file.txt",
+    existing_id: str | None = None,
+    parent_id: str = "parent-id",
 ) -> GoogleDriveFile:
+    """Build a ``wb`` file, stubbing ``fs.info`` for the path and its parent.
+
+    ``existing_id`` is the id returned for ``path`` itself (``None`` means the
+    path does not exist yet, so the upload should create a new file).
+    """
+    parent = fs._parent(path)
+
+    def _info(p: str, *args: object, **kwargs: object) -> dict[str, str]:
+        if fs._strip_protocol(p) == parent:
+            return {"id": parent_id}
+        if existing_id is not None:
+            return {"id": existing_id}
+        raise FileNotFoundError(p)
+
+    fs.info = mock.Mock(side_effect=_info)
     file = GoogleDriveFile(fs, path, mode="wb")
     file.location = "https://example.invalid/upload?upload_id=abc"
     return file
@@ -95,27 +116,62 @@ def test_fetch_range_propagates_other_http_errors(
         file._fetch_range()
 
 
-def test_initiate_upload(mocked_fs: MockedDriveFS) -> None:
+def test_initiate_upload_new_file(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value={"id": "parent-id"})
     mocked_fs.files._http.request.return_value = (
         {"status": "200", "location": "https://upload.example/resume?upload_id=xyz"},
         b"",
     )
 
     file = _write_file(fs)
+    assert file.file_id is None
     try:
         file._initiate_upload()
     finally:
         file.closed = True
 
     assert file.location == "https://upload.example/resume?upload_id=xyz"
-    _, kwargs = mocked_fs.files._http.request.call_args
+    args, kwargs = mocked_fs.files._http.request.call_args
     assert kwargs["method"] == "POST"
+    assert args[0].endswith("/files?uploadType=resumable&supportsAllDrives=true")
     assert json.loads(kwargs["body"].decode()) == {
         "name": "file.txt",
         "parents": ["parent-id"],
     }
+
+
+def test_initiate_upload_existing_file_patches(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    mocked_fs.files._http.request.return_value = (
+        {"status": "200", "location": "https://upload.example/resume?upload_id=xyz"},
+        b"",
+    )
+
+    file = _write_file(fs, existing_id="existing-id")
+    assert file.file_id == "existing-id"
+    try:
+        file._initiate_upload()
+    finally:
+        file.closed = True
+
+    assert file.location == "https://upload.example/resume?upload_id=xyz"
+    args, kwargs = mocked_fs.files._http.request.call_args
+    assert kwargs["method"] == "PATCH"
+    assert args[0].startswith(
+        "https://www.googleapis.com/upload/drive/v3/files/existing-id?"
+    )
+    # No new resource is created, so name/parents are not re-sent.
+    assert json.loads(kwargs["body"].decode()) == {}
+
+
+def test_open_wb_propagates_multiple_files_error(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # A path that already resolves to duplicates must not be overwritten by
+    # creating a third copy; surface the ambiguity instead.
+    fs.info = mock.Mock(side_effect=MultipleFilesError("parent/file.txt"))
+
+    with pytest.raises(MultipleFilesError):
+        GoogleDriveFile(fs, "parent/file.txt", mode="wb")
 
 
 def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:
@@ -156,9 +212,52 @@ def test_upload_chunk_final_updates_dircache(mocked_fs: MockedDriveFS) -> None:
         file.closed = True
 
     assert file.file_id == "file-id"
-    assert len(fs.dircache["parent"]) == 1
-    assert fs.dircache["parent"][0]["name"] == "parent/file.txt"
-    assert fs.dircache["parent"][0]["size"] == 4
+    assert fs.dircache["parent"] == [
+        {
+            "id": "file-id",
+            "name": "parent/file.txt",
+            "mimeType": "text/plain",
+            "size": 4,
+            "type": "file",
+        }
+    ]
+
+
+def test_upload_chunk_final_overwrites_dircache_entry(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # Existing listing already has the file; overwriting must not duplicate it.
+    fs.dircache["parent"] = [
+        {"name": "parent/file.txt", "id": "old-id", "size": 1, "type": "file"}
+    ]
+    mocked_fs.files._http.request.return_value = (
+        {"status": "200"},
+        json.dumps(
+            {"id": "new-id", "name": "file.txt", "mimeType": "text/plain"}
+        ).encode(),
+    )
+    file = _write_file(fs, existing_id="old-id")
+    file.write(b"hello")
+    file.offset = 0
+
+    try:
+        file._upload_chunk(final=True)
+    finally:
+        file.closed = True
+
+    # Whole-listing compare: the single entry is fully replaced, with no stale
+    # fields (old id/size) leaking through from the pre-existing entry.
+    assert fs.dircache["parent"] == [
+        {
+            "id": "new-id",
+            "name": "parent/file.txt",
+            "mimeType": "text/plain",
+            "size": 5,
+            "type": "file",
+        }
+    ]
+    assert file.file_id == "new-id"
 
 
 def test_upload_chunk_final_empty_buffer(mocked_fs: MockedDriveFS) -> None:

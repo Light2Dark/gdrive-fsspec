@@ -37,9 +37,21 @@ def test_mkdir_creates_folder_and_updates_dircache(mocked_fs: MockedDriveFS) -> 
         },
         supportsAllDrives=True,
     )
-    assert result["id"] == "new-id"
+    assert result == {
+        "id": "new-id",
+        "name": "newfolder",
+        "mimeType": DIR_MIME_TYPE,
+    }
     assert fs.dircache["parent/newfolder"] == []
-    assert fs.dircache["parent"][0]["name"] == "parent/newfolder"
+    assert fs.dircache["parent"] == [
+        {
+            "id": "new-id",
+            "name": "parent/newfolder",
+            "mimeType": DIR_MIME_TYPE,
+            "size": 0,
+            "type": "directory",
+        }
+    ]
 
 
 def test_mkdir_raises_when_path_exists(mocked_fs: MockedDriveFS) -> None:
@@ -235,8 +247,14 @@ def test_ls_nested_directory(anon_fs: GoogleDriveFileSystem) -> None:
     anon_fs._list_directory_by_id = mock.Mock(side_effect=list_by_id)
 
     assert anon_fs.ls("parent") == ["parent/child.txt"]
-    assert "parent" in anon_fs.dircache
-    assert anon_fs.dircache["parent"][0]["name"] == "parent/child.txt"
+    assert anon_fs.dircache["parent"] == [
+        {
+            "name": "parent/child.txt",
+            "id": "child-id",
+            "type": "file",
+            "mimeType": "text/plain",
+        }
+    ]
 
 
 def test_ls_nested_subpath_uses_parent_info(anon_fs: GoogleDriveFileSystem) -> None:
@@ -270,7 +288,13 @@ def test_info_non_root_delegates_to_parent(anon_fs: GoogleDriveFileSystem) -> No
 
     info = anon_fs.info("file.txt")
 
-    assert info["id"] == "file-id"
+    assert info == {
+        "name": "file.txt",
+        "id": "file-id",
+        "type": "file",
+        "size": 3,
+        "mimeType": "text/plain",
+    }
 
 
 def test_open_returns_google_drive_file(mocked_fs: MockedDriveFS) -> None:

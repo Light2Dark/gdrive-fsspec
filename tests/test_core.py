@@ -60,6 +60,8 @@ def test_upload_chunk_without_parent_dircache() -> None:
         token="anon", skip_instance_cache=True, use_listings_cache=False
     )
     fs.files = mock.Mock()
+    # New file: the path does not exist yet.
+    fs.info = mock.Mock(side_effect=FileNotFoundError("parent/file.txt"))
     fs.files._http.request.return_value = (
         {"status": "200"},
         json.dumps({"id": "file-id", "name": "file.txt", "size": "4"}).encode(),
@@ -91,8 +93,13 @@ def test_drive_kw_with_drive(anon_fs: GoogleDriveFileSystem) -> None:
 
 def test_root_info(anon_fs: GoogleDriveFileSystem) -> None:
     info = anon_fs.info("")
-    assert info["type"] == "directory"
-    assert info["id"] == anon_fs.root_file_id
+    assert info == {
+        "name": "",
+        "mimeType": DIR_MIME_TYPE,
+        "type": "directory",
+        "size": 0,
+        "id": anon_fs.root_file_id,
+    }
 
 
 def _http_error(status: int) -> HttpError:
