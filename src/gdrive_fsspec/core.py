@@ -73,14 +73,15 @@ ROOT_ID = "root"
 
 
 class GoogleDriveFileSystem(AbstractFileSystem):
-    """
-    Access to google-drive as a file-system. In the google drive API,
-    everything is a file resource. Folders are files with a special MIME type.
+    """Access Google Drive as a file system.
 
-    Limitations:
-    - we assume that each path identifies a unique file. In gdrive, it is
-      possible to have multiple identically named files, and this will
-      result in errors in this implementation.
+    In the Google Drive API, everything is a file resource. Folders are files
+    with a special MIME type.
+
+    Note:
+        We assume that each path identifies a unique file. In Google Drive, it
+        is possible to have multiple identically named files, and this will
+        result in errors in this implementation.
     """
 
     protocol = "gdrive"
@@ -97,38 +98,47 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         auth_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        """
+        """Initialize a Google Drive file system.
+
         Args:
-            root_file_id (str or None): Folder file ID to use as the filesystem root (the empty path ``""``).
-                Obtain it from a folder URL such as ``https://drive.google.com/drive/folders/<id>``.
-                If omitted, defaults to the shared-drive root when ``drive`` is set, otherwise ``"root"``
-                (the authenticated user's My Drive). A shared-drive ID is also accepted here for
-                backwards compatibility (when it cannot be resolved as a file, it is treated as a
-                shared drive and ``drive`` is set from it), but this is a legacy path; prefer passing
-                ``drive`` to target a shared drive.
-            token (str): One of "anon", "browser", "cache", "service_account".
-                Using "browser" will prompt a URL to be put in a browser, and
-                cache the response for future use with token="cache". "browser"
-                will remove any previously cached token file, if it exists.
-            access (str): One of "full_control", "read_only".
-            spaces (str): Category of files to search; can be 'drive',
-                'appDataFolder' and 'photos'. Of these, only the first is general.
-            creds (dict or None): Required for "service_account" token.
-                A dict with the service account credentials from the GCP console (same
-                content as the downloaded JSON). See https://cloud.google.com/iam/docs/service-account-creds#key-types
+            root_file_id: Folder file ID to use as the filesystem root (the empty
+                path ``""``). Obtain it from a folder URL such as
+                ``https://drive.google.com/drive/folders/<id>``. If omitted,
+                defaults to the shared-drive root when ``drive`` is set, otherwise
+                ``"root"`` (the authenticated user's My Drive). A shared-drive ID
+                is also accepted here for backwards compatibility (when it cannot
+                be resolved as a file, it is treated as a shared drive and
+                ``drive`` is set from it), but this is a legacy path; prefer
+                passing ``drive`` to target a shared drive.
+            token: One of ``"anon"``, ``"browser"``, ``"cache"``,
+                ``"service_account"``. Using ``"browser"`` will prompt a URL to
+                be opened in a browser and cache the response for future use with
+                ``token="cache"``. ``"browser"`` removes any previously cached
+                token file, if it exists.
+            access: One of ``"full_control"``, ``"read_only"``.
+            spaces: Category of files to search; can be ``"drive"``,
+                ``"appDataFolder"``, and ``"photos"``. Of these, only the first
+                is general.
+            creds: Required for ``"service_account"`` token. A dict with the
+                service account credentials from the GCP console (same content
+                as the downloaded JSON). See
+                https://cloud.google.com/iam/docs/service-account-creds#key-types.
                 Files must be shared with the service account email from that JSON.
-            drive (str or None): A shared drive to scope API calls to, given as either its
-                ID or its name. Resolved against the drives accessible to the
-                current credentials (via ``drives.list``). Required for service-account uploads.
-                If omitted, operations use the user's My Drive (or anonymous public files when
-                ``token="anon"``). Combine with ``root_file_id`` to start below the shared-drive
-                root, e.g. a subfolder ID inside that drive.
-            auth_kwargs (dict or None): Additional keyword arguments passed to
-                the authentication backend (``pydata_google_auth.get_user_credentials`` for user OAuth, or
-                ``service_account.Credentials.from_service_account_info`` for service accounts).
-                For headless or remote environments where a local callback server is unavailable, pass
+            drive: A shared drive to scope API calls to, given as either its ID
+                or its name. Resolved against the drives accessible to the current
+                credentials (via ``drives.list``). Required for service-account
+                uploads. If omitted, operations use the user's My Drive (or
+                anonymous public files when ``token="anon"``). Combine with
+                ``root_file_id`` to start below the shared-drive root, e.g. a
+                subfolder ID inside that drive.
+            auth_kwargs: Additional keyword arguments passed to the authentication
+                backend (``pydata_google_auth.get_user_credentials`` for user
+                OAuth, or
+                ``service_account.Credentials.from_service_account_info`` for
+                service accounts). For headless or remote environments where a
+                local callback server is unavailable, pass
                 ``use_local_webserver=False`` to request a token via the console.
-            **kwargs: Passed to parent.
+            **kwargs: Passed to the parent class.
         """
         # Ideally, these should be keyword-arguments, but to maintain backwards compatibility, we keep the existing API.
 
@@ -179,8 +189,13 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         Older versions documented ``root_file_id`` as accepting a "share, drive or
         folder ID", so a shared-drive ID may be passed here. When the ID does not
         resolve as a file, fall back to treating it as a shared drive and set
-        ``self.drive`` from it so directory listings are scoped correctly. Prefer
-        passing ``drive`` instead.
+        ``self.drive`` from it so directory listings are scoped correctly.
+
+        Args:
+            drive_id: Shared-drive ID to validate.
+
+        Note:
+            Prefer passing ``drive`` instead of using this legacy path.
         """
         try:
             self.service.drives().get(driveId=drive_id).execute()
@@ -254,7 +269,11 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @cached_property
     def drives(self) -> list[Any]:
-        """Drives accessible to the current user"""
+        """Shared drives accessible to the current user.
+
+        Returns:
+            List of drive resource dicts from the Drive API.
+        """
         out: list[Any] = []
         page_token = None
         while True:
@@ -268,6 +287,19 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @override
     def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> Any:
+        """Create a directory at the given path.
+
+        Args:
+            path: Directory path to create.
+            create_parents: If True, create any missing parent directories first.
+            **kwargs: Ignored; accepted for fsspec compatibility.
+
+        Returns:
+            The created folder's file resource dict from the Drive API.
+
+        Raises:
+            FileExistsError: If a file or folder already exists at ``path``.
+        """
         if create_parents and self._parent(path):
             self.makedirs(self._parent(path), exist_ok=True)
         par = self._parent(path)
@@ -289,6 +321,15 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     @override
     def makedirs(self, path: str, exist_ok: bool = True) -> None:
+        """Create a directory and any missing parent directories.
+
+        Args:
+            path: Directory path to create (may include nested components).
+            exist_ok: If False, raise when the final path component already exists.
+
+        Raises:
+            FileExistsError: If ``exist_ok`` is False and the directory already exists.
+        """
         parts = path.split("/")
         path = ""
         for i, part in enumerate(parts):
@@ -301,6 +342,12 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     @override
     # pyrefly: ignore [bad-override]
     def rm_file(self, path: str, file_id: str | None = None) -> None:
+        """Delete a single file or directory by path.
+
+        Args:
+            path: Path of the file or folder to delete.
+            file_id: Optional Drive file ID; if omitted, resolved from ``path``.
+        """
         file_id = file_id or self.info(path)["id"]
         LOGGER.debug(f"Removing {path}, file_id={file_id}")
         self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
@@ -315,12 +362,30 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     def rm(
         self, path: str, recursive: bool = True, maxdepth: int | None = None
     ) -> None:
+        """Delete a file or directory.
+
+        Args:
+            path: Path of the file or folder to delete.
+            recursive: If False, refuse to delete a non-empty directory.
+            maxdepth: Ignored; accepted for fsspec compatibility.
+
+        Raises:
+            ValueError: If ``recursive`` is False and the directory is not empty.
+        """
         if recursive is False and self.isdir(path) and self.ls(path):
             raise ValueError("Attempt to delete non-empty folder")
         self.rm_file(path)
 
     @override
     def rmdir(self, path: str) -> None:
+        """Remove an empty directory.
+
+        Args:
+            path: Path of the directory to remove.
+
+        Raises:
+            ValueError: If ``path`` is not a directory or is not empty.
+        """
         if not self.isdir(path):
             raise ValueError("Path is not a directory")
         self.rm(path, recursive=False)
@@ -334,9 +399,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         super().invalidate_cache(path)
 
     def export(self, path: str, mime_type: str) -> Any:
-        """Convert a google-native file to another format and download
+        """Export a Google-native file to another format and download it.
 
-        mime_type is something like "text/plain"
+        Use this for Docs, Sheets, Slides, and other Google Workspace files that
+        cannot be downloaded directly with ``open(..., "rb")``.
+
+        Args:
+            path: Path of the Google-native file to export.
+            mime_type: Target MIME type for the export (e.g. ``"text/plain"``).
+
+        Returns:
+            Raw response bytes from the Drive API export endpoint.
         """
         # pyrefly: ignore [missing-attribute]
         file_id = self.path_to_file_id(path)
@@ -345,10 +418,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         ).execute()
 
     def _resolve_drive_id(self, drive: str) -> str:
-        """Resolve a shared-drive ``id`` or ``name`` to its drive ID.
+        """Resolve a shared-drive ID or name to its drive ID.
 
-        ``drive`` may be either a raw shared-drive ID or its human-readable name;
-        both are matched against the drives accessible to the current credentials.
+        Args:
+            drive: Shared-drive ID or human-readable name.
+
+        Returns:
+            The matching shared-drive ID.
+
+        Raises:
+            ValueError: If no drive matches, or the name matches multiple drives.
         """
         if any(d["id"] == drive for d in self.drives):
             return drive
@@ -362,6 +441,21 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     @override
     # pyrefly: ignore [bad-override]
     def ls(self, path: str, detail: bool = False, trashed: bool = False) -> list[Any]:
+        """List files and directories under ``path``.
+
+        Args:
+            path: Directory path to list. Use ``""`` for the filesystem root.
+            detail: If True, return full file-info dicts; otherwise return paths only.
+            trashed: If True, include trashed items in the listing.
+
+        Returns:
+            Sorted list of child paths, or list of file-info dicts when ``detail``
+            is True.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not exist.
+            MultipleFilesError: If multiple files share the same path name.
+        """
         stripped_path = self._strip_protocol(path)
         files = self._ls_from_cache(stripped_path)
 
@@ -411,6 +505,16 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     @override
     # pyrefly: ignore [bad-override]
     def info(self, path: str, trashed: bool = False) -> dict[str, Any]:
+        """Return metadata for a file or directory.
+
+        Args:
+            path: Path to inspect. Use ``""`` for the filesystem root.
+            trashed: If True, allow resolving trashed files.
+
+        Returns:
+            File-info dict including ``name``, ``type``, ``size``, and Drive API
+            fields.
+        """
         stripped_path = self._strip_protocol(path)
         if stripped_path == "":
             return {
@@ -483,16 +587,15 @@ class GoogleDriveFile(AbstractBufferedFile):
         autocommit: bool = True,
         **kwargs: Any,
     ) -> None:
-        """
-        Open a file.
+        """Open a file on Google Drive for reading or writing.
 
-        Parameters
-        ----------
-        fs: instance of GoogleDriveFileSystem
-        mode: str
-            Normal file modes. Currently only 'wb' amd 'rb'.
-        block_size: int
-            Buffer size for reading or writing (default 5MB)
+        Args:
+            fs: GoogleDriveFileSystem instance.
+            path: File path to open.
+            mode: File mode; currently only ``"rb"`` and ``"wb"`` are supported.
+            block_size: Buffer size for reading or writing (default 5 MiB).
+            autocommit: If True, commit the upload when the file is closed.
+            **kwargs: Passed to :class:`AbstractBufferedFile`.
         """
         super().__init__(fs, path, mode, block_size, autocommit=autocommit, **kwargs)
 
@@ -504,10 +607,14 @@ class GoogleDriveFile(AbstractBufferedFile):
 
     @override
     def _fetch_range(self, start: int | None = None, end: int | None = None) -> bytes:
-        """Get data from Google Drive
+        """Fetch bytes from Google Drive for the open file.
 
-        start, end : None or integers
-            if not both None, fetch only given range
+        Args:
+            start: Start byte offset, or None to fetch from the beginning.
+            end: End byte offset (exclusive), or None to fetch through the end.
+
+        Returns:
+            Requested byte range, or empty bytes if the range is not satisfiable.
         """
 
         if self._media_object is None:
@@ -532,12 +639,13 @@ class GoogleDriveFile(AbstractBufferedFile):
     @override
     # pyrefly: ignore [bad-override]
     def _upload_chunk(self, final: bool = False) -> bool:
-        """Write one part of a multi-block file upload
+        """Upload one chunk of a resumable multi-part upload.
 
-        Parameters
-        ----------
-        final: bool
-            Complete and commit upload
+        Args:
+            final: If True, finalize and commit the upload.
+
+        Returns:
+            True when the chunk was uploaded successfully.
         """
         self.buffer.seek(0)
         data = self.buffer.getvalue()
@@ -591,13 +699,13 @@ class GoogleDriveFile(AbstractBufferedFile):
 
     @override
     def commit(self) -> None:
-        """If not auto-committing, finalize file"""
+        """Finalize the upload when ``autocommit`` is False."""
         self.autocommit = True
         self._upload_chunk(final=True)
 
     @override
     def _initiate_upload(self) -> None:
-        """Create multi-upload"""
+        """Start a resumable upload session for a new file."""
         parent_id = self.fs.info(self.fs._parent(self.path))["id"]
         head = {"Content-Type": "application/json; charset=UTF-8"}
         # also allows description, MIME type, version, thumbnail...
@@ -620,7 +728,7 @@ class GoogleDriveFile(AbstractBufferedFile):
 
     @override
     def discard(self) -> None:
-        """Cancel in-progress multi-upload"""
+        """Cancel an in-progress resumable upload."""
         if self.location is None:
             LOGGER.debug("Abort file creation %s", self.path)
             return
