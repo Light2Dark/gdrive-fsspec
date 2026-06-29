@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -5,7 +7,7 @@ import pathlib
 import re
 import warnings
 from functools import cached_property
-from typing import Any, Literal, Mapping, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
 
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from google.auth.credentials import AnonymousCredentials, Credentials
@@ -13,7 +15,14 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from .types import FileInfo
 from .typing_utils import override
+
+if TYPE_CHECKING:
+    from googleapiclient._apis.drive.v3.resources import DriveResource
+    from googleapiclient._apis.drive.v3.schemas import Drive, File
+
+    from .types import FilesResource
 
 DEFAULT_BLOCK_SIZE = 5 * 2**20
 LOGGER = logging.getLogger("gdrive_fsspec")
@@ -50,8 +59,8 @@ def _normalize_path(prefix: str, name: str) -> str:
 
 
 def _finfo_from_response(
-    f: Mapping[str, Any], path_prefix: str | None = None
-) -> dict[str, Any]:
+    f: File | Mapping[str, Any], path_prefix: str | None = None
+) -> FileInfo:
     # strictly speaking, other types might be capable of having children,
     # such as packages
     # TODO: check specifically for links
@@ -60,8 +69,12 @@ def _finfo_from_response(
         name = _normalize_path(path_prefix, f["name"])
     else:
         name = f["name"]
-    info = {"name": name.lstrip("/"), "size": int(f.get("size", 0)), "type": ftype}
-    return {**f, **info}
+    info: FileInfo = {
+        "name": name.lstrip("/"),
+        "size": int(f.get("size", 0)),
+        "type": ftype,
+    }
+    return cast(FileInfo, {**f, **info})
 
 
 class MultipleFilesError(FileNotFoundError):
@@ -89,6 +102,10 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     protocol = "gdrive"
     root_marker = ""
+
+    if TYPE_CHECKING:
+        service: DriveResource
+        files: FilesResource
 
     def __init__(
         self,
@@ -228,7 +245,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         self.files = self.service.files()
 
     @property
-    def srv(self) -> Any:
+    def srv(self) -> DriveResource:
         """Deprecated alias for :attr:`service`."""
         warnings.warn(
             "`srv` is deprecated; use `service` instead.",
@@ -271,24 +288,24 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         )
 
     @cached_property
-    def drives(self) -> list[Any]:
+    def drives(self) -> list[Drive]:
         """Shared drives accessible to the current user.
 
         Returns:
             List of drive resource dicts from the Drive API.
         """
-        out: list[Any] = []
+        drives: list[Drive] = []
         page_token: str | None = None
         while True:
             if page_token is None:
-                ret = self.service.drives().list().execute()
+                response = self.service.drives().list().execute()
             else:
-                ret = self.service.drives().list(pageToken=page_token).execute()
-            out.extend(ret["drives"])
-            page_token = ret.get("nextPageToken")
+                response = self.service.drives().list(pageToken=page_token).execute()
+            drives.extend(response["drives"])
+            page_token = response.get("nextPageToken")
             if page_token is None:
                 break
-        return out
+        return drives
 
     def _path_str(self, path: PathLike) -> str:
         stripped = self._strip_protocol(path)
@@ -296,6 +313,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise TypeError("expected a single path, not a sequence of paths")
         return stripped
 
+    # Return type is Any (not drive.v3 File) to match fsspec AbstractFileSystem.mkdir.
     @override
     def mkdir(self, path: PathLike, create_parents: bool = True, **kwargs: Any) -> Any:
         """Create a directory at the given path.
@@ -306,7 +324,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             **kwargs: Ignored; accepted for fsspec compatibility.
 
         Returns:
-            The created folder's file resource dict from the Drive API.
+            The created folder's file resource dict from the Drive API (drive.v3
+            ``File`` at runtime).
 
         Raises:
             FileExistsError: If a file or folder already exists at ``path``.
@@ -324,7 +343,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if self.exists(stripped_path):
             raise FileExistsError(stripped_path)
         LOGGER.debug(f"Creating {stripped_path}, child of {parent_id}")
-        out = self.files.create(body=meta, supportsAllDrives=True).execute()
+        out: File = self.files.create(body=meta, supportsAllDrives=True).execute()
         if par in self.dircache:
             self.dircache[par].append(_finfo_from_response(out, path_prefix=par))
         self.dircache[stripped_path] = []
@@ -408,7 +427,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             self.dircache.pop(self._strip_protocol(path), None)
         super().invalidate_cache(path)
 
-    def export(self, path: PathLike, mime_type: str) -> Any:
+    def export(self, path: PathLike, mime_type: str) -> bytes:
         """Export a Google-native file to another format and download it.
 
         Use this for Docs, Sheets, Slides, and other Google Workspace files that
@@ -422,10 +441,14 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             Raw response bytes from the Drive API export endpoint.
         """
         # pyrefly: ignore [missing-attribute]
+        # TODO: use export_media; cast needed because export().execute() is Any in stubs
         file_id = self.path_to_file_id(path)
-        return self.files.export(
-            fileId=file_id, mimeType=mime_type, supportsAllDrives=True
-        ).execute()
+        return cast(
+            bytes,
+            self.files.export(
+                fileId=file_id, mimeType=mime_type, supportsAllDrives=True
+            ).execute(),
+        )
 
     def _resolve_drive_id(self, drive: str) -> str:
         """Resolve a shared-drive ID or name to its drive ID.
@@ -448,6 +471,25 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             raise ValueError(f"Drive {drive!r} not found by id or name")
         raise ValueError(f"Drive name {drive!r} refers to multiple shared drives")
 
+    @overload
+    # pyrefly: ignore [bad-override]  # overloads diverge from base ls signature
+    def ls(
+        self,
+        path: PathLike,
+        detail: Literal[False] = False,
+        trashed: bool = False,
+        **kwargs: Any,
+    ) -> list[str]: ...
+
+    @overload
+    def ls(
+        self,
+        path: PathLike,
+        detail: Literal[True],
+        trashed: bool = False,
+        **kwargs: Any,
+    ) -> list[FileInfo]: ...
+
     @override
     def ls(
         self,
@@ -455,7 +497,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         detail: bool = False,
         trashed: bool = False,
         **kwargs: Any,
-    ) -> list[Any]:
+    ) -> list[str] | list[FileInfo]:
         """List files and directories under ``path``.
 
         Args:
@@ -473,7 +515,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             MultipleFilesError: If multiple files share the same path name.
         """
         stripped_path: str = self._path_str(path)
-        files = self._ls_from_cache(stripped_path)
+        files: list[FileInfo] | None = self._ls_from_cache(stripped_path)
 
         if files is None:
             # get parent ID
@@ -516,6 +558,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             return sorted([f["name"] for f in files])
 
+    # Return type is dict[str, Any] (not FileInfo) to match fsspec AbstractFileSystem.info.
     @override
     def info(
         self, path: PathLike, trashed: bool = False, **kwargs: Any
@@ -529,17 +572,18 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         Returns:
             File-info dict including ``name``, ``type``, ``size``, and Drive API
-            fields.
+            fields. Shape matches :class:`~gdrive_fsspec.types.FileInfo`.
         """
         stripped_path = self._path_str(path)
         if stripped_path == "":
-            return {
+            info: FileInfo = {
                 "name": stripped_path,
                 "mimeType": DIR_MIME_TYPE,
                 "type": "directory",
                 "size": 0,
                 "id": self.root_file_id,
             }
+            return cast(dict[str, Any], info)
         return super().info(stripped_path, trashed=trashed)
 
     def _drive_kw(self) -> dict[str, Any]:
@@ -556,8 +600,8 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     def _list_directory_by_id(
         self, file_id: str, trashed: bool = False, path_prefix: str | None = None
-    ) -> list[Any]:
-        all_files = []
+    ) -> list[FileInfo]:
+        all_files: list[FileInfo] = []
         page_token: str | None = None
         afields = "nextPageToken, files(%s)" % FIELDS
         if file_id == ROOT_ID and self.drive is not None:
