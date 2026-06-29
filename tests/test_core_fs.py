@@ -1,5 +1,6 @@
 """Unit tests for GoogleDriveFileSystem directory and path operations."""
 
+import pathlib
 from typing import Any
 from unittest import mock
 
@@ -116,11 +117,26 @@ def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
-def test_rm_file_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
+def test_rm_normalizes_pathlike_for_dircache(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
+    fs.dircache["parent/file"] = empty_listing()
+
+    fs._rm(pathlib.PurePosixPath("parent/file"))
+
+    mocked_fs.files.delete.assert_called_once_with(
+        fileId="file-id", supportsAllDrives=True
+    )
+    assert fs.dircache["parent"] == []
+    assert "parent/file" not in fs.dircache
+
+
+def test_rm_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
     fs.info = mock.Mock()
 
-    fs.rm_file("parent/file", file_id="explicit-id")
+    fs._rm("parent/file", file_id="explicit-id")
 
     mocked_fs.files.delete.assert_called_once_with(
         fileId="explicit-id", supportsAllDrives=True
@@ -267,6 +283,20 @@ def test_open_returns_google_drive_file(mocked_fs: MockedDriveFS) -> None:
 
     assert isinstance(opened, GoogleDriveFile)
     assert opened.path == "file.txt"
+
+
+def test_google_drive_file_normalizes_pathlike(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(
+        return_value={"id": "file-id", "size": 0, "type": "file", "name": "file.txt"}
+    )
+
+    opened = GoogleDriveFile(fs, pathlib.PurePosixPath("file.txt"), mode="rb")
+
+    assert opened.path == "file.txt"
+    # info must be resolved from the normalized str, never a Path
+    for call in fs.info.call_args_list:
+        assert call.args[0] == "file.txt"
 
 
 def test_ls_file_at_root_returns_parent_listing(anon_fs: GoogleDriveFileSystem) -> None:
