@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import re
+import warnings
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, Mapping, TypeAlias, cast, overload
 
@@ -243,8 +244,17 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             raise ValueError(f"Invalid connection method `{method}`.")
         self.service = build("drive", "v3", credentials=cred)
-        self.srv = self.service  # deprecated alias, keep it for backwards compatibility
         self.files = self.service.files()
+
+    @property
+    def srv(self) -> DriveResource:
+        """Deprecated alias for :attr:`service`."""
+        warnings.warn(
+            "`srv` is deprecated; use `service` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.service
 
     @property
     def _user_credentials_cache_path(self) -> str:

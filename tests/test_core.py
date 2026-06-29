@@ -13,6 +13,11 @@ def test_create_anon(anon_fs: GoogleDriveFileSystem) -> None:
     assert anon_fs.service is not None
 
 
+def test_srv_is_deprecated_alias(anon_fs: GoogleDriveFileSystem) -> None:
+    with pytest.warns(DeprecationWarning):
+        assert anon_fs.srv is anon_fs.service
+
+
 def test_auth_kwargs() -> None:
     fs = GoogleDriveFileSystem(
         token="anon",
