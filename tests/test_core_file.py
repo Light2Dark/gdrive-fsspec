@@ -208,6 +208,29 @@ def test_upload_chunk_partial(mocked_fs: MockedDriveFS) -> None:
     assert headers["Content-Range"] == "bytes 0-999/*"
 
 
+def test_upload_chunk_final_308_raises(mocked_fs: MockedDriveFS) -> None:
+    """A 308 on the finalizing PUT means the object was not committed.
+
+    The final chunk sends a concrete total and expects 200/201. Treating a 308
+    here as partial consumption would silently leave the upload unfinalized,
+    since commit()/close() flush only once and ignore the return. It must raise.
+    """
+    fs = mocked_fs.fs
+    mocked_fs.authed_http.request.return_value = (
+        {"status": "308", "range": "bytes=0-499"},
+        b"",
+    )
+    file = _write_file(fs)
+    file.write(b"x" * 1000)
+    file.offset = 0
+
+    with pytest.raises(IOError, match="not finalized"):
+        try:
+            file._upload_chunk(final=True)
+        finally:
+            file.closed = True
+
+
 def test_upload_chunk_partial_accept_keeps_unsent_tail(
     mocked_fs: MockedDriveFS,
 ) -> None:

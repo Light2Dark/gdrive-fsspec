@@ -934,6 +934,16 @@ class GoogleDriveFile(AbstractBufferedFile):
             return True
         if status != 308:
             raise IOError(f"Unexpected resumable status {status}")
+        # A 308 on a finalizing PUT means the server did not commit the object.
+        # This path sends a concrete total and expects 200/201; treating the
+        # 308 as a partial-consumption signal would silently leave the upload
+        # unfinalized, since commit()/close() flush only once and ignore the
+        # re-buffer. Fail loudly instead.
+        if final and self.autocommit:
+            raise IOError(
+                f"Resumable upload not finalized: server returned 308 "
+                f"(range {response.get('range')!r}) on the final chunk"
+            )
         return self._consume_accepted(data, response.get("range"))
 
     def _consume_accepted(self, data: bytes | None, range_header: str | None) -> bool:
