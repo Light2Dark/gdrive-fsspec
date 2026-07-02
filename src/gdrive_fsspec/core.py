@@ -19,6 +19,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, build_http
 
+from gdrive_fsspec.utils import merge_fields
+
 from .types import FileInfo
 from .typing_utils import override
 
@@ -46,18 +48,30 @@ UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 # File resource fields; partial-response mask for files.list / files.get:
 # https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource
 # https://developers.google.com/workspace/drive/api/guides/performance#partial
-FIELDS = ",".join(
-    [
-        "name",
-        "id",
-        "size",
-        "trashed",
-        "mimeType",
-        "version",
-        "createdTime",
-        "modifiedTime",
-    ]
+_BASE_FIELDS = [
+    "name",
+    "id",
+    "size",
+    "trashed",
+    "mimeType",
+    "version",
+    "createdTime",
+    "modifiedTime",
+]
+INFO_FIELDS = ",".join(_BASE_FIELDS)
+
+# Shared-drive role docs, surfaced in permission errors on delete/trash.
+_SHARED_DRIVE_ROLES_URL = "https://support.google.com/a/answer/7337554"
+# https://developers.google.com/workspace/drive/api/guides/delete#permissions for more info.
+_TRASH_PERMISSION_MSG = (
+    "Insufficient permissions to move the file into Trash. On shared drives you "
+    f"need Manager or Content manager access. See {_SHARED_DRIVE_ROLES_URL}"
 )
+_DELETE_PERMISSION_SHARED_DRIVE_MSG = (
+    "Insufficient permissions to permanently delete the file. On shared drives "
+    f"you need Manager access. See {_SHARED_DRIVE_ROLES_URL}"
+)
+_DELETE_PERMISSION_MSG = "Insufficient permissions to permanently delete the file."
 
 
 def _normalize_path(prefix: str, name: str) -> str:
@@ -286,7 +300,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
         # Own the authenticated transport explicitly. Sharing the transport
         # keeps credential refresh and connection state in one place.
-        self.authed_http = AuthorizedHttp(cred, http=build_http())
+        self.authed_http = AuthorizedHttp(
+            cred, http=build_http()
+        )  # TODO: should we make this private?
 
         # AuthorizedHttp duck-types as httplib2.Http (this is exactly what
         # googleapiclient passes internally), but the stubs only accept Http.
@@ -340,6 +356,9 @@ class GoogleDriveFileSystem(AbstractFileSystem):
     @cached_property
     def drives(self) -> list[Drive]:
         """Shared drives accessible to the current user.
+
+        drives.list only returns shared drives
+        https://developers.google.com/workspace/drive/api/reference/rest/v3/drives/list
 
         Returns:
             List of drive resource dicts from the Drive API.
@@ -447,22 +466,36 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
     # We overwrite the base class _rm's method instead of rm_file because rm_file expects a "Never" return
     @override
-    def _rm(self, path: PathLike, file_id: str | None = None) -> None:
+    def _rm(self, path: PathLike) -> None:
         """Delete a single file or directory by path.
 
         Args:
             path: Path of the file or folder to delete.
-            file_id: Optional Drive file ID; if omitted, resolved from ``path``.
         """
         stripped_path = self._path_str(path)
-        file_id = file_id or self.info(stripped_path)["id"]
+        file_info = self.info(stripped_path, fields="driveId,capabilities/canDelete")
+        file_id = file_info["id"]
         LOGGER.debug(f"Removing {stripped_path}, file_id={file_id}")
+
+        # Sometimes, the file exists but delete reports a 404 error.
+        # This is due to a permission issue rather than a file not found error.
+        # https://github.com/Light2Dark/gdrive-fsspec/issues/19
+        # So we check whether we can delete it first.
+        can_delete = file_info.get("capabilities", {}).get("canDelete", False)
+        on_shared_drive = bool(file_info.get("driveId"))
+        if not can_delete and on_shared_drive:
+            raise PermissionError(_DELETE_PERMISSION_SHARED_DRIVE_MSG)
+        elif not can_delete:
+            raise PermissionError(_DELETE_PERMISSION_MSG)
+
         self.files.delete(fileId=file_id, supportsAllDrives=True).execute()
+
         parent = self._parent(stripped_path)
         if parent in self.dircache:
             listing = self.dircache[parent]
             i = [i for i, li in enumerate(listing) if li["name"] == stripped_path][0]
             listing.pop(i)
+
         self.dircache.pop(stripped_path, None)
 
     @override
@@ -531,8 +564,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         if mime_type not in targets:
             valid = ", ".join(targets) if targets else "none"
             raise ValueError(
-                f"Cannot export {path!r} (type {source_mime!r}) to "
-                f"{mime_type!r}. Supported export types: {valid}."
+                f"Cannot export {path!r} (type {source_mime!r}) to {mime_type!r}. Supported export types: {valid}."
             )
 
         request = self.files.export_media(fileId=file_id, mimeType=mime_type)
@@ -622,7 +654,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
 
             # list parent
             files = self._list_directory_by_id(
-                file_id, trashed=trashed, path_prefix=pref
+                file_id, trashed=trashed, path_prefix=pref, **kwargs
             )
             # An empty listing for the root is a valid, empty directory; for any
             # other path an empty listing means the path does not exist.
@@ -643,6 +675,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                         this_file[0]["id"],
                         trashed=trashed,
                         path_prefix=stripped_path,
+                        **kwargs,
                     )
                     self.dircache[stripped_path] = files
 
@@ -651,21 +684,25 @@ class GoogleDriveFileSystem(AbstractFileSystem):
         else:
             return sorted([f["name"] for f in files])
 
-    # Return type is dict[str, Any] (not FileInfo) to match fsspec AbstractFileSystem.info.
     @override
     def info(
-        self, path: PathLike, trashed: bool = False, **kwargs: Any
+        self,
+        path: PathLike,
+        trashed: bool = False,
+        fields: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Return metadata for a file or directory.
 
         Args:
             path: Path to inspect. Use ``""`` for the filesystem root.
             trashed: If True, allow resolving trashed files.
-            kwargs: Ignored; accepted for fsspec compatibility.
+            fields: Extra Drive fields to request on top of the defaults, as a
+                comma-separated string (e.g. ``"driveId,capabilities/canDelete"``).
+                See https://developers.google.com/workspace/drive/api/reference/rest/v3/files#resource.
 
         Returns:
-            File-info dict including ``name``, ``type``, ``size``, and Drive API
-            fields. Shape matches :class:`~gdrive_fsspec.types.FileInfo`.
+            File-info dict including ``name``, ``type``, ``size``, and Drive API fields.
         """
         stripped_path = self._path_str(path)
         if stripped_path == "":
@@ -677,7 +714,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 "id": self.root_file_id,
             }
             return cast(dict[str, Any], info)
-        return super().info(stripped_path, trashed=trashed)
+        return super().info(stripped_path, trashed=trashed, fields=fields, **kwargs)
 
     def _drive_kw(self) -> dict[str, Any]:
         if self.drive is not None:
@@ -692,11 +729,18 @@ class GoogleDriveFileSystem(AbstractFileSystem):
             return empty
 
     def _list_directory_by_id(
-        self, file_id: str, trashed: bool = False, path_prefix: str | None = None
+        self,
+        file_id: str,
+        trashed: bool = False,
+        path_prefix: str | None = None,
+        fields: str | None = None,
     ) -> list[FileInfo]:
         all_files: list[FileInfo] = []
         page_token: str | None = None
-        afields = "nextPageToken, files(%s)" % FIELDS
+
+        file_fields = merge_fields(INFO_FIELDS, fields)
+        all_fields = f"nextPageToken, files({file_fields})"
+
         if file_id == ROOT_ID and self.drive is not None:
             query = f"'{self.drive}' in parents "
         else:
@@ -710,7 +754,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 response = self.files.list(
                     q=query,
                     spaces=self.spaces,
-                    fields=afields,
+                    fields=all_fields,
                     orderBy="name",
                     pageSize=1000,
                     **kwargs,
@@ -719,7 +763,7 @@ class GoogleDriveFileSystem(AbstractFileSystem):
                 response = self.files.list(
                     q=query,
                     spaces=self.spaces,
-                    fields=afields,
+                    fields=all_fields,
                     pageToken=page_token,
                     orderBy="name",
                     pageSize=1000,
@@ -969,8 +1013,7 @@ class GoogleDriveFile(AbstractBufferedFile):
         accepted = 0 if stored_end is None else stored_end + 1 - offset
         if accepted < 0 or accepted > len(data):
             raise IOError(
-                f"Server reported {accepted} accepted bytes outside the "
-                f"{len(data)}-byte chunk at offset {offset}"
+                f"Server reported {accepted} accepted bytes outside the {len(data)}-byte chunk at offset {offset}"
             )
         if accepted == len(data):
             return True
