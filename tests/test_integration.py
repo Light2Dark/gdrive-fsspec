@@ -10,6 +10,11 @@
 #   User OAuth (My Drive or a shared drive you can access):
 #     GDRIVE_FSSPEC_CREDENTIALS_TYPE=cache   # or browser for first login
 #     GDRIVE_FSSPEC_DRIVE=optional-shared-drive-name
+#
+# Optional (permission-denied tests):
+#   GDRIVE_FSSPEC_READONLY_CREDENTIALS_PATH=/path/to/viewer-sa.json
+#     A second service-account key with viewer-only access to
+#     GDRIVE_FSSPEC_DRIVE
 # ---------------------------------------------------------------------------
 
 from typing import cast
@@ -134,6 +139,34 @@ def test_rm_file_removes_from_listing(fs: GoogleDriveFileSystem) -> None:
     assert fs.exists(filename)
     fs.rm(filename)
     assert not fs.exists(filename)
+
+
+@pytest.mark.integration
+def test_rm_missing_file_raises_file_not_found(
+    fs: GoogleDriveFileSystem,
+) -> None:
+    # Deleting a file that does not exist should surface FileNotFoundError, not a
+    # raw HttpError. rm resolves the file via info() first, which raises when the
+    # path is absent.
+    with pytest.raises(FileNotFoundError):
+        fs.rm(_test_path("never_existed"))
+
+
+@pytest.mark.integration
+def test_rm_insufficient_permissions_raises_permission_error(
+    fs: GoogleDriveFileSystem, readonly_fs: GoogleDriveFileSystem
+) -> None:
+    # A file created by the privileged identity but deleted through a read-only
+    # identity: visible in ls(), forbidden to delete. rm checks capabilities.canDelete
+    # up front and raises an actionable PermissionError instead of a masked 404.
+    filename = _test_path("forbidden_delete")
+    with fs.open(filename, "wb") as f:
+        # pyrefly: ignore [bad-argument-type]
+        f.write(b"cannot delete me")
+
+    assert readonly_fs.exists(filename)
+    with pytest.raises(PermissionError, match="Manager"):
+        readonly_fs.rm(filename)
 
 
 @pytest.mark.integration

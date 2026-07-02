@@ -114,9 +114,14 @@ def test_makedirs_exist_ok_false_raises(mocked_fs: MockedDriveFS) -> None:
         fs.makedirs("a/b", exist_ok=False)
 
 
+def _deletable_info(**extra: Any) -> dict[str, Any]:
+    """A file-info dict for a file the caller is allowed to delete."""
+    return {"id": "file-id", "capabilities": {"canDelete": True}, **extra}
+
+
 def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.info = mock.Mock(return_value=_deletable_info())
     fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
     fs.dircache["parent/file"] = empty_listing()
 
@@ -129,9 +134,22 @@ def test_rm_file_deletes_and_updates_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
+def test_rm_requests_capabilities_and_drive_id(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    fs.info = mock.Mock(return_value=_deletable_info())
+
+    fs._rm("parent/file")
+
+    # The capability check must be resolved in the same info() call, not a
+    # separate follow-up request.
+    fs.info.assert_called_once_with(
+        "parent/file", fields="driveId,capabilities/canDelete"
+    )
+
+
 def test_rm_normalizes_pathlike_for_dircache(mocked_fs: MockedDriveFS) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock(return_value={"id": "file-id"})
+    fs.info = mock.Mock(return_value=_deletable_info())
     fs.dircache["parent"] = [{"name": "parent/file", "id": "file-id"}]
     fs.dircache["parent/file"] = empty_listing()
 
@@ -144,16 +162,63 @@ def test_rm_normalizes_pathlike_for_dircache(mocked_fs: MockedDriveFS) -> None:
     assert "parent/file" not in fs.dircache
 
 
-def test_rm_uses_explicit_file_id(mocked_fs: MockedDriveFS) -> None:
+def test_rm_no_delete_permission_on_shared_drive_raises_with_role_hint(
+    mocked_fs: MockedDriveFS,
+) -> None:
     fs = mocked_fs.fs
-    fs.info = mock.Mock()
-
-    fs._rm("parent/file", file_id="explicit-id")
-
-    mocked_fs.files.delete.assert_called_once_with(
-        fileId="explicit-id", supportsAllDrives=True
+    fs.info = mock.Mock(
+        return_value={
+            "id": "file-id",
+            "driveId": "drive-1",
+            "capabilities": {"canDelete": False},
+        }
     )
-    fs.info.assert_not_called()
+
+    with pytest.raises(PermissionError, match="Manager access"):
+        fs._rm("parent/file")
+
+    # Nothing is deleted when the capability check fails.
+    mocked_fs.files.delete.assert_not_called()
+
+
+def test_rm_no_delete_permission_on_my_drive_omits_shared_drive_advice(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # No driveId → a My Drive file; the shared-drive role hint would mislead.
+    fs.info = mock.Mock(
+        return_value={"id": "file-id", "capabilities": {"canDelete": False}}
+    )
+
+    with pytest.raises(PermissionError) as excinfo:
+        fs._rm("parent/file")
+
+    assert "shared drives" not in str(excinfo.value)
+    mocked_fs.files.delete.assert_not_called()
+
+
+def test_rm_missing_capabilities_treated_as_not_deletable(
+    mocked_fs: MockedDriveFS,
+) -> None:
+    fs = mocked_fs.fs
+    # Absent capabilities block deletion rather than risk a masked-404 failure.
+    fs.info = mock.Mock(return_value={"id": "file-id"})
+
+    with pytest.raises(PermissionError):
+        fs._rm("parent/file")
+
+    mocked_fs.files.delete.assert_not_called()
+
+
+def test_rm_missing_file_raises_file_not_found(mocked_fs: MockedDriveFS) -> None:
+    fs = mocked_fs.fs
+    # info() surfaces a genuinely missing file before the capability check.
+    fs.info = mock.Mock(side_effect=FileNotFoundError("parent/file"))
+
+    with pytest.raises(FileNotFoundError):
+        fs._rm("parent/file")
+
+    mocked_fs.files.delete.assert_not_called()
 
 
 def test_rm_non_empty_folder_without_recursive_raises(
